@@ -137,6 +137,8 @@ const fbm = (x, y, seed) => noise2(x, y, seed) * 0.65 + noise2(x * 3, y * 3, see
       do: [
         "Keep a fixed-size pool of impulses in a ring buffer (16 to 32). Never push to an unbounded array on pointermove — that grows without limit and allocates every frame.",
         "Decay the contribution of each impulse with an exponential envelope (exp(-DECAY * age)) so the surface always settles back to perfect calm instead of snapping to rest.",
+        "Set the decay from the LIFETIME you want, and remember the lifetime is the product of two numbers: the envelope and the alpha you scale it by. A drop is only visible while envelope * alphaFactor is above roughly 8% opacity, so at DECAY 2.4 with a 0.5 factor a trail is gone in about half a second and reads as a cursor smear. About 1.5-1.8 per second with a 0.8 factor gives the 1.5s linger that reads as water; check the tail, not the peak.",
+        "If you only need the visual and not the height field, skip the grid: pre-render one soft ring sprite per colour (transparent centre, a bright crest at about 55% radius, fading at the edge) and blit it once per live impulse at the radius the impulse implies. That is one draw per impulse instead of one sample per grid cell per impulse, and the result reads the same at a fraction of the cost. Use the sampled grid only when something else must react to the displacement, such as shapes bobbing on the surface.",
         "Sum the live impulses at each sample point. Interference is the entire reason to model a field; taking the maximum instead gives you rings that merely overlap.",
         "Choose the profile deliberately: cos(k * PI * 3) * (1-k)^2 gives three soft crests that fade at the edge, so a bigger drop spreads wider (calmer) rather than just brighter.",
         "Cost: samples x live impulses, not samples x pool size — skip dead impulses before calling hypot(). A 60x36 grid with six live impulses is roughly 13k cheap ops (~0.3ms); with all 24 live it is about 50k (~1.5ms).",
@@ -146,7 +148,13 @@ const fbm = (x, y, seed) => noise2(x, y, seed) * 0.65 + noise2(x * 3, y * 3, see
         "One expanding circle per pointer event: hairlines that vanish in under a second read as a cursor trail, not as water.",
         "An amplitude with no ceiling — a fast scroll or trackpad fling turns the surface into a strobe.",
       ],
-      params: { pool: "24 impulses", decay: "2.4 per second (~1.7s to invisible)", reach: "60px + amp * 260px", grid: "60x36 samples" },
+      params: {
+        pool: "24 impulses",
+        decay: "1.5-1.8 per second for a ~1.5s linger; 2.4 fades in under a second",
+        alphaFactor: ".8 of the envelope for a visible trail, and cap it (about .55) on a big drop",
+        reach: "60px + amp * 260px",
+        grid: "60x36 samples, only if something else reads the displacement",
+      },
       verify:
         "Wiggle the pointer hard and confirm the surface settles back to calm within about two seconds; check the frame stays under budget with all impulses live.",
       pattern: `const POOL = 24;   // fixed: no growth, no per-frame allocation
@@ -330,6 +338,7 @@ addEventListener("pointermove", (e) => {
       why: "Very light, very calm palettes are the hardest to make look deliberate, because a big pale field with nothing in it reads as unfinished rather than minimal. A few percent of grain gives the eye something to resolve and makes everything else look printed instead of painted.",
       do: [
         "Prefer a small repeating tile — a 64px noise PNG under a kilobyte, or a 140px inline SVG feTurbulence data-URI — over a full-screen generated image.",
+        "Desaturate the noise explicitly: feTurbulence generates independent noise per colour channel, so without a feColorMatrix saturate 0 in the same filter you get coloured speckle rather than grain, which reads as a rendering fault on a pale background.",
         "Keep the grain layer fixed, pointer-events none, above the content, at 2-5% opacity. Past about 8% it stops reading as material and starts reading as a compression artifact.",
         "Measure before you blend: mix-blend-mode: soft-light or overlay promotes the layer and can cost real time over a large area on a mid-range phone, while a plain low-opacity overlay is usually indistinguishable in a soft palette.",
         "Never put grain, blur or a blend mode over body text: it lowers effective contrast and makes long reading unpleasant. Texture belongs over fields and images, not over paragraphs.",
@@ -346,7 +355,7 @@ addEventListener("pointermove", (e) => {
   position: fixed; inset: 0; z-index: 2;
   pointer-events: none;
   opacity: .035;
-  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='140' height='140'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='.8' numOctaves='2'/%3E%3C/filter%3E%3Crect width='140' height='140' filter='url(%23n)'/%3E%3C/svg%3E");
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='140' height='140'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='.8' numOctaves='2'/%3E%3CfeColorMatrix type='saturate' values='0'/%3E%3C/filter%3E%3Crect width='140' height='140' filter='url(%23n)'/%3E%3C/svg%3E");
 }`,
       sources: [
         {
