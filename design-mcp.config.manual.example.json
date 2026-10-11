@@ -1,0 +1,8 @@
+{
+  "roles": {
+    "concept": { "provider": "manual", "model": "you" },
+    "builder": { "provider": "manual", "model": "you" },
+    "critic": { "provider": "manual", "model": "you" }
+  },
+  "limits": { "variations": 3, "maxFixRounds": 3 }
+}

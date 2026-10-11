@@ -1,0 +1,14 @@
+{
+  "mcpServers": {
+    "design-mcp": {
+      "command": "node",
+      "args": ["/ABSOLUTE/PATH/TO/design-mcp/dist/index.js"],
+      "env": {
+        "DESIGN_MCP_PROJECT_DIR": "/ABSOLUTE/PATH/TO/YOUR/WEBSITE/PROJECT",
+        "ANTHROPIC_API_KEY": "sk-ant-...",
+        "OPENAI_API_KEY": "sk-...",
+        "GOOGLE_API_KEY": "..."
+      }
+    }
+  }
+}

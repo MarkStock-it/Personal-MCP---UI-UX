@@ -1,0 +1,9 @@
+{
+  "roles": {
+    "concept": { "provider": "anthropic", "model": "claude-sonnet-5-5" },
+    "builder": { "provider": "anthropic", "model": "claude-sonnet-5-5" },
+    "critic":  { "provider": "anthropic", "model": "claude-sonnet-5-5" },
+    "image":   { "provider": "openai",    "model": "gpt-image-1" }
+  },
+  "limits": { "variations": 3, "maxFixRounds": 3 }
+}

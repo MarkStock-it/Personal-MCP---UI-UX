@@ -1,0 +1,129 @@
+import fs from "node:fs";
+import path from "node:path";
+import { z } from "zod";
+import type { ImageProviderId, TextProviderId } from "./types.js";
+
+const textRole = z.object({
+  // "session" = your AI host answers via MCP sampling (no key). "manual" = prompts are parked as files for you to answer (no key, any host).
+  provider: z.enum(["anthropic", "openai", "google", "session", "manual"]),
+  model: z.string().min(1),
+});
+const imageRole = z.object({
+  provider: z.enum(["openai", "google"]),
+  model: z.string().min(1),
+});
+
+const DEFAULT_ALLOWLIST = [
+  "three", "@types/three", "@react-three/fiber", "@react-three/drei", "ogl", "motion",
+  "split-type", "matter-js", "@types/matter-js", "@use-gesture/react", "simplex-noise",
+];
+
+const DEFAULT_TEXT = { provider: "anthropic" as const, model: "claude-sonnet-5-5" };
+
+const TestGroup = z.enum(["mobile", "a11y", "perf"]);
+
+export const ConfigSchema = z.object({
+  roles: z
+    .object({
+      concept: textRole.default(DEFAULT_TEXT),
+      builder: textRole.default(DEFAULT_TEXT),
+      critic: textRole.default(DEFAULT_TEXT),
+      image: imageRole.default({ provider: "openai", model: "gpt-image-1" }),
+    })
+    .default({}),
+  limits: z
+    .object({
+      variations: z.number().int().min(1).max(5).default(3),
+      maxFixRounds: z.number().int().min(0).max(3).default(3),
+    })
+    .default({}),
+  build: z
+    .object({
+      maxImages: z.number().int().min(0).max(12).default(6),
+      repairRounds: z.number().int().min(0).max(4).default(2),
+      installTimeoutSec: z.number().int().min(30).default(300),
+      buildTimeoutSec: z.number().int().min(30).default(240),
+      firstPort: z.number().int().min(1024).max(65000).default(5201),
+      concurrency: z.number().int().min(1).max(6).default(3),
+      // Only these extra npm packages may be added to a variation (supply-chain safety). Edit to allow more.
+      extraDependencyAllowlist: z.array(z.string()).default(DEFAULT_ALLOWLIST),
+    })
+    .default({}),
+  test: z
+    .object({
+      // "chromium" = Playwright's bundled browser. "chrome"/"msedge" = the one already installed on your machine.
+      channel: z.enum(["chromium", "chrome", "msedge"]).default("chromium"),
+      // Groups where a failed check blocks the variation. Anything else only warns. Runtime errors always block.
+      strictGroups: z.array(TestGroup).default(["mobile", "a11y"]),
+      budgets: z
+        .object({
+          jsGzKB: z.number().default(250),
+          cssGzKB: z.number().default(60),
+          imagesKB: z.number().default(2500),
+          totalKB: z.number().default(4000),
+          p95FrameMs: z.number().default(34),
+          lcpMs: z.number().default(2500),
+          cls: z.number().default(0.1),
+        })
+        .default({}),
+    })
+    .default({}),
+});
+
+export type Config = z.infer<typeof ConfigSchema>;
+export type BuildConfig = Config["build"];
+export type TestConfig = Config["test"];
+
+export function projectDir(): string {
+  return path.resolve(process.env.DESIGN_MCP_PROJECT_DIR ?? process.cwd());
+}
+
+/** Where this tool keeps its own files inside your project. */
+export function stateDir(): string {
+  return path.join(projectDir(), ".design-mcp");
+}
+
+export function loadConfig(): { config: Config; source: string } {
+  const candidates = [
+    process.env.DESIGN_MCP_CONFIG,
+    path.join(projectDir(), "design-mcp.config.json"),
+  ].filter(Boolean) as string[];
+
+  for (const file of candidates) {
+    if (fs.existsSync(file)) {
+      let raw: unknown;
+      try {
+        raw = JSON.parse(fs.readFileSync(file, "utf8"));
+      } catch (e) {
+        throw new Error(`Config file ${file} is not valid JSON: ${(e as Error).message}`);
+      }
+      const parsed = ConfigSchema.safeParse(raw);
+      if (!parsed.success) {
+        throw new Error(`Config file ${file} is invalid:\n${parsed.error.issues.map((i) => `- ${i.path.join(".")}: ${i.message}`).join("\n")}`);
+      }
+      return { config: parsed.data, source: file };
+    }
+  }
+  return { config: ConfigSchema.parse({}), source: "built-in defaults (no config file found)" };
+}
+
+const KEY_ENV = { anthropic: "ANTHROPIC_API_KEY", openai: "OPENAI_API_KEY", google: "GOOGLE_API_KEY" } as const;
+
+export function keyEnvName(provider: keyof typeof KEY_ENV): string {
+  return KEY_ENV[provider];
+}
+
+/** session/manual use your own assistant, not an API key. */
+export function providerNeedsKey(provider: string): boolean {
+  return provider !== "session" && provider !== "manual";
+}
+
+export function apiKeyFor(provider: TextProviderId | ImageProviderId): string {
+  const name: string | undefined = (KEY_ENV as Record<string, string>)[provider];
+  if (!name) throw new Error(`The "${provider}" provider uses your own assistant, not an API key.`);
+  const key = process.env[name];
+  if (!key) {
+    throw new Error(`Missing ${name}. Add it to the "env" block of this server in Cursor's mcp.json.`);
+  }
+  return key;
+}

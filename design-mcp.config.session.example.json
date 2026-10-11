@@ -1,0 +1,8 @@
+{
+  "roles": {
+    "concept": { "provider": "session", "model": "host-default" },
+    "builder": { "provider": "session", "model": "host-default" },
+    "critic": { "provider": "session", "model": "host-default" }
+  },
+  "limits": { "variations": 3, "maxFixRounds": 3 }
+}

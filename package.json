@@ -1,0 +1,32 @@
+{
+  "name": "design-mcp",
+  "version": "0.6.0",
+  "description": "MCP server that generates, tests and critiques anti-slop website designs",
+  "type": "module",
+  "private": true,
+  "bin": {
+    "design-mcp": "dist/index.js"
+  },
+  "scripts": {
+    "build": "tsc",
+    "smoke": "node smoke/smoke.mjs",
+    "test": "npm run smoke",
+    "dev": "tsx src/index.ts",
+    "start": "node dist/index.js",
+    "inspect": "npx @modelcontextprotocol/inspector node dist/index.js"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.17.0",
+    "zod": "^3.25.0",
+    "playwright": "^1.48.0",
+    "axe-core": "^4.10.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "tsx": "^4.19.0",
+    "typescript": "^5.6.0"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}
