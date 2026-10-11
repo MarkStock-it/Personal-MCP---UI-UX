@@ -43,9 +43,88 @@ try {
   console.log("== tools/list ==");
   const { tools } = await client.listTools();
   const names = tools.map((t) => t.name).sort();
-  const expected = ["brief_check", "brief_init", "concepts_generate", "concepts_review", "design_build", "design_critique", "design_report", "design_status", "design_test", "manual_answer", "manual_pending", "providers_config", "providers_test", "usage_report"];
-  check(`14 tools registered (${names.length} found)`, names.length === expected.length, names.join(","));
+  const expected = [
+    "brief_check", "brief_init", "concepts_generate", "concepts_review", "design_build", "design_critique", "design_report",
+    "design_status", "design_test", "manual_answer", "manual_pending", "providers_config", "providers_test", "usage_report",
+    // design playbook (offline knowledge + deterministic checks)
+    "antislop_check", "critique_rubric", "design_playbook", "motion_pattern", "palette_check", "playbook_topics",
+  ];
+  check(`20 tools registered (${names.length} found)`, names.length === expected.length, names.join(","));
   check("all expected tools present", expected.every((n) => names.includes(n)));
+
+  console.log("== resources + prompts (the playbook is addressable, not only callable) ==");
+  const { resources } = await client.listResources();
+  const uris = resources.map((r) => r.uri).sort();
+  check("10 design:// resources registered", resources.length === 10, uris.join(","));
+  check("one resource per playbook topic", ["motion", "organic", "typography", "color", "layout", "floor", "rubric", "slop"].every((t) => uris.includes(`design://playbook/${t}`)));
+  check("rubric sections resource exists", uris.includes("design://rubric/sections"));
+  const readMotion = await client.readResource({ uri: "design://playbook/motion" });
+  check("reading a resource returns its content", !!readMotion.contents?.[0]?.text?.includes("Motion"), readMotion.contents?.[0]?.text?.slice(0, 80));
+  const { prompts } = await client.listPrompts();
+  check("2 prompts registered", prompts.length === 2, prompts.map((p) => p.name).join(","));
+  check("premium_pass + motion_review present", ["premium_pass", "motion_review"].every((p) => prompts.some((x) => x.name === p)));
+  const gotPrompt = await client.getPrompt({ name: "premium_pass", arguments: { target: "a landing page" } });
+  check("premium_pass embeds the rubric", !!gotPrompt.messages?.[0]?.content?.text?.includes("CRITIQUE RUBRIC"));
+
+  console.log("== design playbook (offline knowledge, no keys) ==");
+  const idx = await call("playbook_topics");
+  check("playbook_topics lists every topic", !idx.error && ["motion", "organic", "typography", "color", "layout", "floor", "rubric", "slop"].every((t) => idx.text.includes(t)), idx.text.slice(0, 120));
+  const topic = await call("design_playbook", { topic: "motion" });
+  check("design_playbook reads a topic", !topic.error && topic.text.includes("easing-by-role"), topic.text.slice(0, 100));
+  const byEntry = await call("design_playbook", { entry: "displacement-ripples" });
+  check("design_playbook fetches an entry by id", !byEntry.error && byEntry.text.includes("Sources:"), byEntry.text.slice(0, 100));
+  check("entries show their sources and licences", /\[.*\]/.test(byEntry.text) && /http/.test(byEntry.text));
+  const byQuery = await call("design_playbook", { query: "soft palette contrast" });
+  check("design_playbook searches several terms", !byQuery.error && /match\(es\)/.test(byQuery.text), byQuery.text.slice(0, 120));
+  const noHit = await call("design_playbook", { query: "zzzz-nothing" });
+  check("a search with no match explains itself without erroring", !noHit.error && noHit.text.includes("Nothing in the playbook matched"), noHit.text.slice(0, 120));
+  const badEntry = await call("design_playbook", { entry: "nope" });
+  check("an unknown entry id errors cleanly", badEntry.error && badEntry.text.includes("playbook_topics"));
+  const pat = await call("motion_pattern", { need: "a group of cards should arrive together" });
+  check("motion_pattern always returns the reduced-motion contract", !pat.error && pat.text.includes("reduced-motion-contract"), pat.text.slice(0, 120));
+  const rubric = await call("critique_rubric");
+  check("critique_rubric returns 11 weighted sections summing to 100", !rubric.error && /weights sum 100/.test(rubric.text) && (rubric.text.match(/\n## /g) || []).length === 11);
+  const oneSection = await call("critique_rubric", { focus: "depth-and-layering", how: true });
+  check(
+    "critique_rubric can focus one section and add the how-to",
+    !oneSection.error && oneSection.text.includes("# Depth and layering") && oneSection.text.includes("one-bold-idea") && !oneSection.text.includes("## First impression"),
+    oneSection.text.slice(0, 120)
+  );
+  const badFocus = await call("critique_rubric", { focus: "nope" });
+  check("an unknown rubric section errors cleanly", badFocus.error && badFocus.text.includes("Existing:"));
+
+  console.log("== palette_check (deterministic contrast + softness) ==");
+  const good = await call("palette_check", { colours: ["#F7F5FB", "#E9E6F3", "#2B2742", "#5B58C9"] });
+  check("a working palette reports AA body contrast", !good.error && good.text.includes("AA body"), good.text.slice(0, 140));
+  check("it classifies surfaces, inks and accents", !good.error && /surface/.test(good.text) && /ink\b/.test(good.text) && /accent/.test(good.text));
+  const harsh = await call("palette_check", { colours: ["#F4FF00", "#0018FF"] });
+  check("a harsh high-chroma pair is called out", !harsh.error && /harsh/i.test(harsh.text), harsh.text.slice(0, 160));
+  const purple = await call("palette_check", { colours: ["#F7F5FB", "#8B5CF6"] });
+  check("a violet in the purple band (hue 250-295) is flagged", !purple.error && /purple\/indigo/.test(purple.text), purple.text.slice(0, 160));
+  // Tailwind's indigo-500 sits just below that band (hue ~239), so it must be caught by the harshness rule instead.
+  const indigo = await call("palette_check", { colours: ["#F7F5FB", "#2B2742", "#6366F1"] });
+  check("indigo-500 #6366F1 is caught as a harsh field", !indigo.error && /harsh/i.test(indigo.text), indigo.text.slice(0, 160));
+  const notHex = await call("palette_check", { colours: ["#FFF", "rgb(1,2,3)"] });
+  check("non-hex input errors cleanly", notHex.error && notHex.text.includes("#RRGGBB"));
+
+  console.log("== antislop_check (source scanning) ==");
+  const sloppy = await call("antislop_check", {
+    text: [
+      "h1 { font-family: Inter, sans-serif; background: linear-gradient(90deg,#6366f1,#a855f7); border-radius: 16px; box-shadow: 0 8px 24px rgba(0,0,0,.2); }",
+      "<p>Welcome to our platform. Unlock the power of seamless workflows.</p>",
+      "<div class='avatar'>Lorem ipsum</div>",
+    ].join("\n"),
+  });
+  check("a slop snippet produces findings", !sloppy.error && /match\(es\)/.test(sloppy.text), sloppy.text.slice(0, 140));
+  check("findings carry a line number and a better move", !sloppy.error && /line 1/.test(sloppy.text) && /instead:/.test(sloppy.text));
+  check("banned typeface and cliche copy are both caught", !sloppy.error && /banned|font/i.test(sloppy.text) && /welcome|unlock|cliche|lorem/i.test(sloppy.text));
+  await fs.writeFile(path.join(tmp, "clean.css"), ":root{--ink:#2B2742;--paper:#F7F5FB}\n.card{border-radius:.5rem}\n");
+  const clean = await call("antislop_check", { path: "clean.css" });
+  check("scanning a real file path works", !clean.error && clean.text.includes("clean.css"), clean.text.slice(0, 140));
+  const noArgs = await call("antislop_check");
+  check("antislop_check without text or path errors cleanly", noArgs.error && noArgs.text.includes("`text` or `path`"));
+  const escape = await call("antislop_check", { path: "../../etc/hosts" });
+  check("antislop_check cannot read outside the project", escape.error && escape.text.includes("inside the project"), escape.text.slice(0, 140));
 
   console.log("== providers_config (no API call) ==");
   const cfg = await call("providers_config");
