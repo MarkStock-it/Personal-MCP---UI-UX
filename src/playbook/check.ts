@@ -67,15 +67,19 @@ export function softness(hex: string): SoftnessNote {
   // saturation that lint.ts flags on a concept). It is reported alongside the verdict rather than
   // as its own exclusive branch: the loudest violet and the most obvious default are usually the
   // same colour, and a reviewer needs to hear both.
-  const purple = h >= 250 && h <= 295 && s > 0.4;
+  // Only a mid-tone can be the "generated UI" colour: a near-white paper or a near-black ink that
+  // happens to sit on that hue is a legitimate surface or ink, not a default accent.
+  const purple = h >= 250 && h <= 295 && s > 0.4 && l > 0.32 && l < 0.78;
   const alsoPurple = purple
     ? " It also sits in the default purple/indigo band (hue 250-295 at over 40% saturation), which is the signature of generated UI: keep it as a small accent, or shift the hue on purpose."
     : "";
 
   if (s > 0.55 && l > 0.32 && l < 0.78)
     return { level: "harsh", note: `${hex} (${hsl}) is a high-chroma mid-lightness colour: as a field it reads loud/neon.${alsoPurple}` };
-  if (l <= 0.12 || l >= 0.97)
-    return { level: "watch", note: `${hex} (${hsl}) is near pure black/white; it flattens the page and clashes with a tinted paper. Use a hue-biased ink or paper instead.${alsoPurple}` };
+  // What is wrong with pure white or black is the missing hue bias, not the lightness: a tinted
+  // paper at 97% lightness is a design decision, so only near-neutral extremes are flagged.
+  if ((l >= 0.97 || l <= 0.06) && s < 0.08)
+    return { level: "watch", note: `${hex} (${hsl}) is a neutral near-white/near-black: it flattens the page. Give it a hue bias (a tinted paper or a coloured ink) instead.` };
   if (purple)
     return { level: "watch", note: `${hex} (${hsl}) sits in the default purple/indigo band (hue 250-295 at over 40% saturation). Keep it as a small accent or shift the hue on purpose.` };
   if (l >= 0.78)
@@ -110,12 +114,14 @@ export function paletteCheck(input: string[]): PaletteReport {
   const surfaces = colours.filter((c) => c.role === "surface");
   const accents = colours.filter((c) => c.role === "accent");
   const pairs: PaletteReport["pairs"] = [];
-  // Check ink against every plausible background, including the accent (an accent chip is a background too).
-  for (const fg of [...inks, ...accents]) {
-    for (const bg of [...surfaces, ...(inks.length ? [] : []), ...accents.filter((a) => a !== fg)]) {
-      const ratio = contrastRatio(fg.hex, bg.hex);
-      pairs.push({ fg: fg.hex, bg: bg.hex, ratio, verdict: contrastVerdict(ratio) });
-    }
+  const push = (fg: string, bg: string) => pairs.push({ fg, bg, ratio: contrastRatio(fg, bg), verdict: contrastVerdict(contrastRatio(fg, bg)) });
+  // Only combinations that can actually occur: text sitting on a surface, accent text on a surface,
+  // and text on an accent chip. Accent-on-accent is not a real pairing, and reporting it only buries
+  // the ratios that matter under a list of meaningless 1.1:1 rows.
+  for (const fg of inks) for (const bg of surfaces) push(fg.hex, bg.hex);
+  for (const a of accents) {
+    for (const bg of surfaces) push(a.hex, bg.hex);
+    for (const ink of inks) push(ink.hex, a.hex);
   }
   pairs.sort((a, b) => a.ratio - b.ratio);
 
@@ -147,7 +153,7 @@ export function renderPalette(r: PaletteReport): string {
     `Hue spread (saturated colours only): ${r.hueSpread.toFixed(0)}deg`,
     "",
     "Contrast (lowest first):",
-    ...r.pairs.slice(0, 10).map((p) => `  ${p.fg} on ${p.bg}: ${p.ratio.toFixed(2)}:1 — ${p.verdict}`),
+    ...r.pairs.slice(0, 12).map((p) => `  ${p.fg} on ${p.bg}: ${p.ratio.toFixed(2)}:1 — ${p.verdict}`),
     "",
     r.problems.length ? `Problems:\n${r.problems.map((p) => `  - ${p}`).join("\n")}` : "Problems: none found.",
     r.suggestions.length ? `\nSuggestions:\n${r.suggestions.map((s) => `  - ${s}`).join("\n")}` : "",

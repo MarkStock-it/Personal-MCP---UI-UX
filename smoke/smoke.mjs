@@ -106,6 +106,17 @@ try {
   check("indigo-500 #6366F1 is caught as a harsh field", !indigo.error && /harsh/i.test(indigo.text), indigo.text.slice(0, 160));
   const notHex = await call("palette_check", { colours: ["#FFF", "rgb(1,2,3)"] });
   check("non-hex input errors cleanly", notHex.error && notHex.text.includes("#RRGGBB"));
+  // A muted grey that is 4.34:1 on its own field must be reported as failing for body text.
+  const muted = await call("palette_check", { colours: ["#E9E6F3", "#2B2742", "#6C6788"] });
+  check("a muted grey below 4.5:1 is reported as not AA body", !muted.error && /#6C6788 on #E9E6F3: 4\.3\d:1 — AA large\/UI only/.test(muted.text), muted.text.slice(0, 200));
+  const mutedFixed = await call("palette_check", { colours: ["#E9E6F3", "#2B2742", "#615C7D"] });
+  check("darkening that grey past 4.5:1 clears it", !mutedFixed.error && !/Problems:\n  - /.test(mutedFixed.text), mutedFixed.text.slice(0, 200));
+  // A tinted paper at 97% lightness is a decision, not the neutral near-white the warning targets.
+  const tintedPaper = await call("palette_check", { colours: ["#F7F5FB", "#2B2742"] });
+  check("a hue-biased paper is not flagged as pure white", !tintedPaper.error && !/near white|near-white/.test(tintedPaper.text), tintedPaper.text.slice(0, 200));
+  const pure = await call("palette_check", { colours: ["#FFFFFF", "#000000"] });
+  check("true white/black still flagged", !pure.error && /neutral near-white/.test(pure.text), pure.text.slice(0, 200));
+  check("no meaningless accent-on-accent pairs are reported", !muted.error && !/#615C7D on #4F4CA8|#6C6788 on #615C7D/.test(muted.text));
 
   console.log("== antislop_check (source scanning) ==");
   const sloppy = await call("antislop_check", {
