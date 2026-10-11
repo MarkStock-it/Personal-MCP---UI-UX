@@ -1,0 +1,499 @@
+import type { RubricSection, Topic } from "./types.js";
+
+/**
+ * The critique rubric. This is the half of design review that a generator cannot do for
+ * itself: deciding whether a finished page is good, with evidence, and returning one fix
+ * that matters instead of twenty that don't.
+ *
+ * Sections are scored 0-4 against their anchors and multiplied by `weight`. The weights sum
+ * to 100 and are deliberately uneven: a page with a strong first impression and a visible
+ * idea outranks a page that is merely well-lit and safe. The four entries below the sections
+ * explain how to run the whole review — read them before scoring anything.
+ */
+
+export const RUBRIC_SECTIONS: RubricSection[] = [
+  {
+    id: "first-impression",
+    title: "First impression and hierarchy",
+    weight: 12,
+    lookFor: [
+      "One element clearly leads, and you can name it in a single sentence without looking twice.",
+      "The eye's actual path: what it lands on first, second and third, and whether that order matches the intent.",
+      "Whether the page's purpose is clear from the first screen alone, with no scrolling and no reading of the body copy.",
+      "Whether the page has a deliberate bottom (a colophon, a closing mark, a next step) rather than simply stopping.",
+    ],
+    flag: [
+      "Everything is at a similar size and weight, so nothing leads and the page reads as a list of equals.",
+      "The first screen is occupied by empty space or a large image while the actual content sits below the fold.",
+      "The composition would survive having its words swapped for any other brand's words.",
+      "The page ends in a large region of nothing, so the reader's last impression is blankness.",
+    ],
+    verify:
+      "Screenshot the viewport at 1440x900 and at 390x844. Blur it heavily and desaturate it, then write down the order in which the shapes read, largest to smallest. Compare that written order with the order the design intends, and record both.",
+    anchors: [
+      "No hierarchy: nothing leads, and after five seconds you cannot say what the page is for.",
+      "A title leads, but every other element is weighted equally, so there is no second or third step and the page has no bottom.",
+      "Clear title and a legible first screen, but nothing distinctive is remembered and the page stops rather than closes.",
+      "One element leads, the reading order is obvious, the purpose is clear in one sentence, and the page has a real end.",
+      "All of the above, plus the first screen contains one detail a viewer repeats back unprompted a day later.",
+    ],
+  },
+  {
+    id: "concept-fit",
+    title: "Concept fit and the one memorable thing",
+    weight: 12,
+    lookFor: [
+      "The single idea, stated in one sentence, and at least three places in the layout, type, colour or motion where it is actually implemented.",
+      "Whether the signature idea is present in a still image, not only after an interaction a visitor may never perform.",
+      "Whether the concept survives having the palette removed — if only the colours carry it, it is a skin, not a concept.",
+      "Whether the memorable thing shipped, or exists only in the design notes.",
+    ],
+    flag: [
+      "The concept lives only in the palette and the copy while the structure is a standard template.",
+      "The signature interaction leaves no persistent trace, so a visitor who never moves the pointer never encounters the idea.",
+      "Sections could be reordered freely without changing the meaning, which means the sequence carries no idea.",
+      "The design notes describe features the build does not contain.",
+      "Two competing ideas fight for the same screen, so neither one lands.",
+    ],
+    verify:
+      "Produce one screenshot in grayscale and one with all text hidden, and ask whether the concept is still identifiable. Then list every place in the code (file and line) where the concept is implemented, and compare that list against what the design claims.",
+    anchors: [
+      "No idea is detectable; the page is a generic template with topic-specific copy dropped in.",
+      "An idea is stated in the notes but appears only as colour, so the structure and motion contradict it.",
+      "The idea is present and consistent but invisible in a still, or visible in only one place.",
+      "One idea, implemented in structure, type and motion, and still readable as the concept with colour removed.",
+      "The idea is unmistakable, present without interaction, and a visitor could describe it back from memory.",
+    ],
+  },
+  {
+    id: "space-and-rhythm",
+    title: "Space, density and rhythm",
+    weight: 11,
+    lookFor: [
+      "Alternation between loud sections and quiet ones, so attention rises and rests rather than staying level.",
+      "A spacing scale that is actually reused: gaps and padding drawn from a small consistent set of values.",
+      "The relationship between the space between sections and the space inside them, and which one is meant to dominate.",
+      "Whether the intended rhythm survives at 390px, where vertical space is the scarcest resource.",
+    ],
+    flag: [
+      "Every section carries an identical top and bottom margin, so the page reads as an unmodulated list.",
+      "The density is uniform: the reader is never given a rest, or is given so much rest that nothing connects.",
+      "Large empty regions that hold neither content nor composition — emptiness because nothing was designed there.",
+      "The densest region is the top and everything loosens downward for no reason tied to the idea.",
+      "Horizontal padding changes between sections, so elements fail to line up down the page.",
+    ],
+    verify:
+      "Measure in the browser the gap between every pair of adjacent sections and the internal padding of each, and print the resulting list of values. A repeated scale (for example 4, 8, 12, 16, 24, 40, 64) is rhythm; a scattering of one-off numbers is drift.",
+    anchors: [
+      "Uniform spacing throughout with no loud or quiet moments; the page has no shape over time.",
+      "One spacing value repeated everywhere, with accidental gaps where content happened to be tall.",
+      "A reasonable scale, but density never changes, so nothing is emphasised and nothing is allowed to rest.",
+      "A small deliberate scale with at least two clear loud/quiet transitions and space that belongs to the loudest element.",
+      "The rhythm is legible in a 25%-scale full-page screenshot: the page has visible beats, and they hold at 390px.",
+    ],
+  },
+  {
+    id: "depth-and-layering",
+    title: "Depth and layering",
+    weight: 10,
+    lookFor: [
+      "At least three distinguishable layers — a field, a subject and a foreground voice — and which element belongs to which.",
+      "Overlap, scale or softness used to separate layers, so elements can read as in front of or behind each other.",
+      "Whether the background has structure of its own instead of being a flat fill that could be any colour.",
+      "Whether anything is partially occluded, which is the clearest evidence that a real stack exists.",
+    ],
+    flag: [
+      "Every element sits on the same z-plane, so the page reads flat no matter what the palette does.",
+      "An identical drop shadow is the only depth cue and it is applied to everything.",
+      "The background is a single flat colour across the whole page, so there is no field to sit in.",
+      "A decorative background image is pasted in as a header and never interacts with the content above it.",
+      "Layering is achieved at the cost of legibility: text sits over a busy field without protection.",
+    ],
+    verify:
+      "Screenshot the page, then in the browser record the computed blur, opacity, scale and z-index of each visual layer and list them. Check the contrast of foreground text against the composited background it actually renders over, not against the nominal surface colour.",
+    anchors: [
+      "One flat plane; no element appears in front of or behind another.",
+      "A single shadow on cards is the only depth, and it reads as decoration rather than space.",
+      "Two layers exist but they never overlap, so depth is implied rather than shown.",
+      "Three clear layers, at least one real overlap, and background structure that belongs to the concept.",
+      "Depth is structural and interactive: layers move or respond at different rates, and the text stays legible throughout.",
+    ],
+  },
+  {
+    id: "typography-range",
+    title: "Typography range and detail",
+    weight: 11,
+    lookFor: [
+      "A scale ladder with real jumps between steps, rather than several sizes clustered within a few pixels of each other.",
+      "A reading measure inside roughly 60-75 characters per line for body copy.",
+      "At least three distinct voices: a display voice for loud moments, a text voice for reading, and a quiet label voice for metadata.",
+      "Optical detail: real quotation marks and dashes, hanging punctuation on pull quotes, tabular numerals for figures, tracking adjusted for size and for uppercase.",
+    ],
+    flag: [
+      "One family at one weight carries the whole page, so there is no loud and no quiet.",
+      "The display face is used for paragraphs, so nothing on the page reads as text.",
+      "Lines run past roughly 85 characters, which forces a tracking-back at every line break.",
+      "Metadata is set in the same voice as body copy, so dates and labels clutter the reading rather than receding.",
+      "Large type left at default tracking; uppercase set without added letter-spacing; straight quotes or hyphens standing in for dashes.",
+    ],
+    verify:
+      "Print the computed font-family, size, line-height and weight for every text role in the page, and read the resulting ladder for gaps and near-duplicates. Count characters on one full line of body copy. Repeat the ladder at 390px and confirm no role collapses into another.",
+    anchors: [
+      "A single size and weight throughout; no hierarchy and no reading measure to speak of.",
+      "Two or three sizes but no voice difference, and the measure is either too wide or too narrow.",
+      "A workable ladder and measure, yet the label scale is missing so metadata competes with content.",
+      "Three distinct voices with deliberate jump sizes, a readable measure, and real typographic detail throughout.",
+      "The type system carries the concept: scale, width or optical size responds to meaning, and small details are handled at 390px too.",
+    ],
+  },
+  {
+    id: "colour-and-material",
+    title: "Colour and material",
+    weight: 10,
+    lookFor: [
+      "A stated reason for the palette drawn from the subject or material, rather than a harmony recipe applied to any subject.",
+      "Surfaces derived from a base with mixing or alpha rather than selected one component at a time.",
+      "Whether a deliberate softness was preserved, or whether a loud colour slipped in and took over a large field.",
+      "Contrast results for every ink/surface pair actually used, and the derivation of any tint that carries text.",
+    ],
+    flag: [
+      "Pure white or pure black fields, which flatten the page and clash with any tinted surface nearby.",
+      "Two mid-tone bright colours competing, so neither reads as the accent.",
+      "A high-chroma colour used as a large field, making the page feel like it glows.",
+      "Components each carrying their own unrelated surface colour, so nothing reads as one material.",
+      "Gradients that only decorate: removing them changes nothing about how the page reads.",
+      "Text placed over a translucent layer whose worst-case composite was never computed.",
+    ],
+    verify:
+      "Run the palette check on the declared colours and paste the full ratio table into the report. Screenshot in grayscale to confirm the composition survives without hue. Sample actual rendered pixels from at least three translucent layers to confirm they composite to the intended colour.",
+    anchors: [
+      "Arbitrary colours with failing contrast and no relationship between surfaces.",
+      "A palette that is applied but unexplained, with at least one pair below 4.5:1 for body text.",
+      "Contrast passes everywhere and the palette is coherent, but nothing has material character.",
+      "A reasoned palette, derived surfaces, passing contrast, and at least one element with real material quality.",
+      "Colour and material carry meaning: surfaces relate, softness is preserved where intended, and the palette would be recognisable with the logo removed.",
+    ],
+  },
+  {
+    id: "motion-and-interaction",
+    title: "Motion and interaction",
+    weight: 10,
+    lookFor: [
+      "An easing choice per transition that follows its role: entrances settle, exits leave, on-screen moves travel.",
+      "Choreography: whether anything leads the sequence or everything moves at once.",
+      "Behaviour when the user acts mid-transition — whether state can be interrupted and re-targeted without sticking.",
+      "Durations tied to the distance and size of what moves, instead of one global duration for everything.",
+      "What the reduced-motion path renders: a complete, composed static state, not a disabled page.",
+    ],
+    flag: [
+      "Identical duration and easing on every transition, so nothing has emphasis.",
+      "Linear motion on interface state changes, which reads mechanical.",
+      "One shared curve for entrance and exit, making exits feel sluggish.",
+      "An interrupted animation leaves elements stuck between states.",
+      "Motion that carries no information: perpetual drift, pulsing, or floating shapes that never resolve.",
+      "Reduced motion simply switches transitions off, leaving a bare or broken layout.",
+      "An effect that animates height, top or margin and so causes layout shift on every frame.",
+    ],
+    verify:
+      "Record p95 frame time while scrolling and while the heaviest interaction runs, using a frame timer in the page. Re-screenshot with prefers-reduced-motion emulated and confirm the static state is complete. Check how many animation loops keep running with the tab hidden or after the element is scrolled out of view.",
+    anchors: [
+      "Motion is either absent or decorative, and reduced motion is unhandled.",
+      "Motion exists but uses one duration and curve for everything, with nothing choreographed.",
+      "Purposeful easing per role and durations that fit distance, but interruptions or reduced motion are unhandled.",
+      "A choreographed sequence with role-appropriate easing, a complete reduced-motion state, and a measured frame cost.",
+      "Motion carries meaning: it shows where things come from and go, it can be interrupted cleanly, and it is measured within budget.",
+    ],
+  },
+  {
+    id: "states-and-edge-cases",
+    title: "States and edge cases",
+    weight: 8,
+    lookFor: [
+      "A designed empty state that says what is missing and what to do next.",
+      "How the layout behaves at exactly one item, and at many more items than the design was drawn with.",
+      "Long-content behaviour: an overlong title, an unbroken token, a table wider than the viewport.",
+      "Loading and error behaviour for anything asynchronous.",
+      "Hover, focus and active states that are distinguishable from rest and consistent with each other.",
+    ],
+    flag: [
+      "An empty collection renders as a blank region with no explanation.",
+      "The design exists only at the count used in the demo, and the layout degrades at one or at twelve.",
+      "A long title or a long unbroken word breaks the layout, overflows its container, or creates sideways scrolling.",
+      "A failed request renders nothing at all, so failure and emptiness are indistinguishable.",
+      "Hover is the only affordance, and keyboard focus has no visible state.",
+      "Placeholder data is indistinguishable from real content to the reader.",
+    ],
+    verify:
+      "Run the interface with 0, 1 and at least 12 items and screenshot each. Enter a title around 120 characters. Block the network and confirm the error state. Tab through every interactive element and screenshot the focus ring on each.",
+    anchors: [
+      "Only the happy path with the demo item count; empty, long and error states are undefined.",
+      "Some states exist but are unstyled, and long content breaks the layout.",
+      "Happy path plus empty state, but loading, error or long-content behaviour is missing.",
+      "All states designed: empty, one, many, loading, error, long content, hover and focus are each deliberate.",
+      "States are designed and verified with evidence for each count and failure, and the layout holds at 390px in all of them.",
+    ],
+  },
+  {
+    id: "accessibility-floor",
+    title: "Accessibility floor",
+    weight: 8,
+    lookFor: [
+      "A full keyboard pass: every control reachable, focus always visible, order matching the visual order, no trap.",
+      "Semantic structure: landmarks, one h1, headings in order, real buttons and links rather than divs with handlers.",
+      "Accessible names on every control, alt text on meaningful images, decorative elements hidden from assistive tech.",
+      "Text contrast at 4.5:1 for body and 3:1 for large text and non-text boundaries, computed against the real composite.",
+      "A skip link to the main content that becomes visible when focused.",
+    ],
+    flag: [
+      "Focus lands on a programmatic container and paints a ring across the entire page, which reads as a stray border.",
+      "Focus styles vanish against the surface they land on, or are removed without a replacement.",
+      "Icon-only buttons with no accessible name.",
+      "Colour as the only carrier of meaning, such as a tint that signals state on its own.",
+      "Interactive targets smaller than 24x24 CSS pixels.",
+      "Custom controls that cannot be operated by keyboard at all.",
+      "Missing lang attribute or document title.",
+    ],
+    verify:
+      "Run an automated audit and paste its serious and critical findings. Complete a keyboard pass with a screenshot of focus on every stop. Compute contrast for every text node against the background it actually composites over and record the raw ratios.",
+    anchors: [
+      "Keyboard access, contrast or names fail in ways that block use.",
+      "Automated audit shows blocking findings, such as failing contrast or unnamed controls.",
+      "No blocking findings, but focus treatment or semantics are inconsistent.",
+      "Keyboard, semantics, names and contrast all pass, with the evidence recorded.",
+      "The floor is met and exceeded: it was tested with the keyboard and at both widths, and nothing in the design depends on a single sense.",
+    ],
+  },
+  {
+    id: "performance-floor",
+    title: "Performance floor",
+    weight: 4,
+    lookFor: [
+      "Numbers rather than adjectives: script and style weight, image weight, largest paint, layout shift, p95 frame time.",
+      "A measured cost for the heaviest visual effect, not an assumption that it is cheap.",
+      "The cost of anything continuous: fonts, canvas layers, observers, animation loops.",
+      "Whether quality adapts when the device cannot keep up.",
+    ],
+    flag: [
+      "An effect costing several milliseconds per frame while the user is trying to read.",
+      "Reading geometry and writing styles in the same handler, forcing layout on every event.",
+      "Animating properties that force layout or paint instead of transform and opacity.",
+      "Images without intrinsic dimensions, so the page shifts as they load.",
+      "Fonts that block first paint with no fallback strategy.",
+      "A background layer that keeps animating when hidden, off-screen or idle.",
+    ],
+    verify:
+      "Print largest contentful paint, cumulative layout shift, total blocking time, and p95 frame time during a full scroll, then compare against the server's own budgets (250 KB gzipped script, 60 KB gzipped style, 4000 KB total, 34 ms p95 frame time, 2500 ms LCP, 0.1 CLS). Record the numbers even when they pass.",
+    anchors: [
+      "Weights or frame times are far over budget and the heavy effect is visibly janky.",
+      "One or more budgets are exceeded and nothing adapts on slower devices.",
+      "Budgets are met with little headroom, and the heaviest effect has never been measured.",
+      "All budgets met with measured headroom, and the heaviest effect has a recorded cost.",
+      "Performance is designed in: quality adapts, continuous work stops when it cannot be seen, and the numbers are recorded each pass.",
+    ],
+  },
+  {
+    id: "content-honesty",
+    title: "Content honesty",
+    weight: 4,
+    lookFor: [
+      "Whether every string shown to a reader is true in the build as it stands.",
+      "Whether any form claims an outcome it cannot deliver, such as a success message with nothing behind it.",
+      "Whether figures, logos and quotations are real and traceable, or illustrative.",
+      "Whether placeholder copy is flagged in the code and never presented to a reader as final.",
+    ],
+    flag: [
+      "A subscription or contact form that reports success with no endpoint behind it.",
+      "Statistics or claims with no source anywhere in the project.",
+      "A testimonial, logo or name that belongs to nobody.",
+      "Placeholder text shipped as the final copy.",
+      "A demo-only capability described to the reader as working.",
+    ],
+    verify:
+      "For every user-visible claim, trace it to data, an endpoint or a documented source in the code. Anything that cannot be traced, record as unverified, and state explicitly in the report which claims you could not verify.",
+    anchors: [
+      "The interface asserts things that are false, such as a success state with no backend.",
+      "Placeholder content is presented as real, with no marking in the code.",
+      "Content is honest but thin, and unverifiable claims are not labelled anywhere.",
+      "Every claim traces to data or an endpoint, and anything unverified is labelled as such.",
+      "Nothing is asserted that the build cannot support, and the report states exactly which claims remain unverified.",
+    ],
+  },
+];
+
+export const RUBRIC_TOPIC: Topic = {
+  id: "rubric",
+  title: "Critique rubric and review method",
+  summary:
+    "Eleven weighted sections for reviewing a finished interface with evidence, plus how to run the review: score everything, then report the one fix with the highest impact. Use it after a page renders, never before.",
+  entries: [
+    {
+      id: "how-to-score",
+      name: "Score, then name one fix",
+      intent: "Turning a rendering page into a defensible verdict, when you need a diagnosis rather than a list of opinions.",
+      why:
+        "A weighted score forces every part of the page to be examined instead of reviewing whatever the eye notices first. Reporting the single highest-impact fix is what makes a review useful, because it tells the author what to do next rather than what is wrong in general.",
+      do: [
+        "Score every one of the eleven sections 0-4 against its anchors before writing any conclusion, so no section is skipped for being unmemorable.",
+        "Attach the evidence to each score: a measurement, a screenshot, a recorded frame time, or an explicit note that nothing was verified.",
+        "Multiply each score by its section weight and report the total as a band (for example 'mid-range, 52-58 of 100'), never as false precision to a decimal place.",
+        "End every review with exactly one highest-impact fix, chosen by how much a reader or user would notice the change, and say what result to expect.",
+        "State plainly which sections you could not assess and why, instead of scoring them on impression.",
+      ],
+      avoid: [
+        "Averaging away a zero: a genuine failure in the accessibility floor is not compensated by strong typography, and reporting only the total hides that.",
+        "Listing twenty findings with equal emphasis, which leaves the author with no idea what to do first.",
+        "Scoring content honesty or performance without having looked for the supporting evidence.",
+      ],
+      params: {
+        scale: "0 = absent or broken, 2 = competent, 4 = concept-carrying",
+        band_reporting: "coarse bands, not decimals",
+        fixes_reported: "one, ranked by impact",
+      },
+      verify:
+        "Have a second person score the same page using this rubric without seeing your scores. A gap of two or more points on any single section means the section's anchors are ambiguous, not that one of you is wrong; record which section disagreed.",
+      sources: [
+        {
+          title: "Heuristic evaluation and severity ratings",
+          url: "https://www.nngroup.com/articles/ten-usability-heuristics/",
+          license: "proprietary / all rights reserved",
+          adapted: false,
+          change: "cited, not adapted — used only as background on rating findings by severity rather than by count",
+        },
+        {
+          title: "WCAG 2.2, contrast and target-size minimums",
+          url: "https://www.w3.org/TR/WCAG22/",
+          license: "W3C Document License (2023); derivatives not granted",
+          adapted: false,
+          change: "cited, not adapted — the numeric thresholds used in the accessibility and colour sections come from the specification",
+        },
+      ],
+    },
+    {
+      id: "one-bold-idea",
+      name: "One bold idea, everything else quiet",
+      intent: "Deciding where to spend a page's courage when several good ideas compete for the same screen.",
+      why:
+        "A page reads as premium when one thing is emphatic and everything around it is disciplined, because contrast is what makes emphasis legible. Several simultaneous novelties cancel each other out and the result reads as noise, which is the usual cause of a page feeling busy yet empty.",
+      do: [
+        "Write down the one moment a returning visitor would describe to someone else, and make that the only thing that receives a new effect.",
+        "Spend the boldness on the element that carries meaning, not on the element that is easiest to animate.",
+        "Keep everything else quiet: one spacing scale, a small set of type roles, no second competing signature interaction.",
+        "Require the bold idea to exist in a still image too, so it is not lost on a visitor who never interacts.",
+        "If the existing concept is already good but invisible, make it visible rather than adding a second idea beside it.",
+        "Ship at most one new effect per revision, and remove a weaker existing effect when you add one, so the total stays legible.",
+      ],
+      avoid: [
+        "Boldness spread evenly across the page, which reads as decoration and is remembered as neither.",
+        "A signature effect that only appears on a hover or pointer move the visitor may never trigger.",
+        "Adding the new effect on top of the old ones until the page has four centres of attention.",
+      ],
+      params: {
+        new_effects_per_revision: "1",
+        loud_elements_per_view: "1",
+        quiet_supporting_roles: "few and reused",
+      },
+      verify:
+        "Screenshot with and without interaction. If the memorable moment cannot be identified in the still screenshot by someone who has not read the design notes, the idea is not shipped yet.",
+      sources: [
+        {
+          title: "Visual hierarchy",
+          url: "https://www.nngroup.com/articles/visual-hierarchy-ux-definition/",
+          license: "proprietary / all rights reserved",
+          adapted: false,
+          change: "cited, not adapted — background on emphasis and how attention is directed",
+        },
+        {
+          title: "Refactoring UI",
+          url: "https://www.refactoringui.com/",
+          license: "proprietary / all rights reserved",
+          adapted: false,
+          change: "cited, not adapted — consulted for the general position that hierarchy comes from contrast between elements, expressed here in my own words",
+        },
+      ],
+    },
+    {
+      id: "evidence-over-taste",
+      name: "Evidence over taste",
+      intent: "Replacing 'it feels empty' with a claim that can be checked, so a redesign is aimed at a real cause.",
+      why:
+        "Subjective verdicts send a redesign in the wrong direction, because the stated cause is often a symptom of something measurable three layers down. A measurement costs less than a rebuild and survives the next review, when taste may have changed.",
+      do: [
+        "Convert every complaint into a measurement before acting: 'flat' becomes a layer inventory, 'empty' becomes section gaps and content density, 'slow' becomes p95 frame time.",
+        "Take screenshots at both a desktop and a phone width before touching anything, so a change can be compared against a recorded baseline.",
+        "Tab through the whole interface and record the focus state of each stop, rather than assuming focus works because it is styled.",
+        "Throttle the CPU and re-run the heaviest interaction, so cost is judged on a slower device than the one you are developing on.",
+        "Label anything you did not verify as unverified in the report, and never present an assumption as a result.",
+      ],
+      avoid: [
+        "Reporting a fix as a success because the code compiled, when the behaviour it changed was never exercised.",
+        "Treating a passed automated audit as proof of quality; it proves the absence of one class of failure.",
+        "Comparing against memory instead of a stored baseline screenshot.",
+      ],
+      params: {
+        baselines: "one per width, before any change",
+        widths: "1440x900 and 390x844",
+        unverified_claims: "labelled explicitly",
+      },
+      verify:
+        "Re-read the report and mark every sentence that asserts a result. Each such sentence must name the check that produced it, or be moved into a clearly labelled unverified list.",
+      sources: [
+        {
+          title: "Core Web Vitals guidance",
+          url: "https://web.dev/articles/vitals",
+          license: "CC BY 4.0 (per Google for Developers site policies)",
+          adapted: false,
+          change: "cited, not adapted — used for the set of measurable loading, shift and responsiveness metrics named above",
+        },
+        {
+          title: "ARIA Authoring Practices Guide (keyboard interaction patterns)",
+          url: "https://www.w3.org/WAI/ARIA/apg/",
+          license: "W3C Document License (2023); derivatives not granted",
+          adapted: false,
+          change: "cited, not adapted — consulted for keyboard-interaction expectations",
+        },
+      ],
+    },
+    {
+      id: "report-shape",
+      name: "The shape of a useful critique",
+      intent: "Writing the review itself, so the author can act on it in one sitting.",
+      why:
+        "A critique that buries its verdict in a list of observations costs the author more work than it saves. Four fixed parts — verdict, what works, ranked fixes with evidence, what was not checked — make the review scannable and keep it honest about its own limits.",
+      do: [
+        "Open with a one-line verdict that names the page's single biggest problem, not a summary of everything.",
+        "Follow with what genuinely works, and say why it works, so the redesign does not discard it by accident.",
+        "Rank the fixes: each one names the evidence that produced it, the change to make, and the observable result to expect.",
+        "Close with what was not checked, including sections of the rubric that were skipped and any behaviour that was assumed.",
+        "Keep it short enough to read once: verdict, what works, the ranked fixes, what was not checked.",
+      ],
+      avoid: [
+        "A findings list ordered by how the page was explored rather than by impact.",
+        "Fixes phrased as taste ('make it feel more premium') with no observable result attached.",
+        "Omitting the unverified list, which lets the author treat an assumption as a tested fact.",
+      ],
+      params: {
+        ranked_fixes: "3-6, highest impact first",
+        per_fix: "evidence, change, expected result",
+        closing_section: "what was not checked",
+      },
+      verify:
+        "Give the report to someone who has not seen the page and ask them to state, in one sentence, what to change first. If they cannot, the ranking is not doing its job.",
+      sources: [
+        {
+          title: "Heuristic evaluation, reporting findings by severity",
+          url: "https://www.nngroup.com/articles/how-to-conduct-a-heuristic-evaluation/",
+          license: "proprietary / all rights reserved",
+          adapted: false,
+          change: "cited, not adapted — consulted for how evaluations are structured and reported, not for wording",
+        },
+        {
+          title: "IBM Carbon design system, motion and content foundations",
+          url: "https://github.com/carbon-design-system/carbon",
+          license: "Apache License 2.0 (repository); the documentation site's editorial text is not covered by it",
+          adapted: false,
+          change: "cited, not adapted — used as an example of a system that documents motion and content rules explicitly",
+        },
+      ],
+    },
+  ],
+};
