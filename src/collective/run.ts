@@ -31,6 +31,9 @@ import {
   type Unit,
   type WorkerReport,
 } from "./roles.js";
+import { admitFromMission, loadMemory, renderMemoryBlock, type LoadedMemory, type MemoryItem } from "./memory.js";
+import { renderConversation, runPeerRound, type PeerRound } from "./peer.js";
+import { handleFor } from "./personas.js";
 import { verifyReports, type Verification } from "./verify.js";
 
 export interface MissionInput {
@@ -48,7 +51,11 @@ export interface MissionResult {
   plan: LeaderPlan;
   verification: Verification;
   synthesis: Synthesis;
-  stats: { workers: number; calls: number; verified: number; rejected: number; contextTokens: number; digestTokens: number; cached: boolean; closingRan: boolean; ms: number };
+  /** Round two, when it ran: what the copies said to each other, and which of it was ever checked. */
+  conversation?: PeerRound;
+  /** What this mission added to, and retired from, the collective's memory. */
+  memory: { added: MemoryItem[]; reinforced: number; stale: MemoryItem[]; live: number };
+  stats: { workers: number; calls: number; verified: number; rejected: number; contextTokens: number; digestTokens: number; cached: boolean; closingRan: boolean; peerCalls: number; ms: number };
   warnings: string[];
 }
 
@@ -69,11 +76,17 @@ export async function runMission(projectRoot: string, cfg: MissionConfig, input:
   const digestTokens = estimateTokens(digest);
   log(`digest: ~${digestTokens} tokens (budget ${cfg.codebase.digestTokens}) — this is all the leader sees of the repo`);
 
+  const memory: LoadedMemory = cfg.collective.memory ? await loadMemory(projectRoot) : { items: [], stale: [], live: [] };
+  const memoryBlock = cfg.collective.memory ? renderMemoryBlock(memory, { tokens: cfg.collective.memoryTokensInPrompt }) : "";
+  if (memory.live.length || memory.stale.length) {
+    log(`memory: ${memory.live.length} live entr${memory.live.length === 1 ? "y" : "ies"} in front of the collective${memory.stale.length ? `, ${memory.stale.length} retired as stale` : ""}`);
+  }
+
   const maxUnits = Math.min(cfg.collective.maxUnits, input.units ?? cfg.collective.maxUnits);
   const planAsk = await askJson({
     role: "leader",
     system: leaderSystem(maxUnits),
-    user: leaderUser({ mission: input.mission, digest, focus: input.focus, paths: input.paths, maxUnits }),
+    user: leaderUser({ mission: input.mission, digest, focus: input.focus, paths: input.paths, maxUnits, memory: memoryBlock }),
     schema: LeaderPlanSchema,
     maxTokens: 2200,
     attempts: 2,
@@ -116,7 +129,7 @@ export async function runMission(projectRoot: string, cfg: MissionConfig, input:
           const asked = await askJson({
             role: "worker",
             system: workerSystem(unit.role),
-            user: workerUser(unit, renderPack(pack)),
+            user: workerUser(unit, renderPack(pack), memoryBlock),
             schema: WorkerReportSchema,
             maxTokens: 2600,
             attempts: 2,
@@ -140,15 +153,27 @@ export async function runMission(projectRoot: string, cfg: MissionConfig, input:
   log(`verification: ${verification.counts.verified} verified, ${verification.rejected.length} rejected of ${verification.claims.length} claims (${verification.ms} ms, no model involved)`);
   if (verification.conflicts.length) for (const c of verification.conflicts) log(`  conflict: ${c}`);
 
+  // Round two: the copies finally read each other. Only verified findings are exchanged, their replies go
+  // through the same gate, and an unevidenced rebuttal is recorded as exactly that rather than as doubt.
+  let conversation: PeerRound | undefined;
+  if (cfg.collective.peerRound && reports.length >= 2) {
+    log(`round two: ${reports.length} worker(s) read each other (verified findings only)`);
+    conversation = await runPeerRound({ projectRoot, units, reports, verification, memoryBlock, concurrency: workerCount, log });
+    if (conversation.unevidenced) log(`  ${conversation.unevidenced} rebuttal(s) came with no quote and stand as unproven`);
+  } else if (cfg.collective.peerRound) {
+    warnings.push("round two was skipped: it needs at least two workers to have reported");
+  }
+
   let synthesis: Synthesis;
   let closingRan = false;
   if (cfg.collective.synthesize && reports.length) {
     const evidence = renderEvidence(units, reports, verification);
+    const conversationText = conversation ? `\n\n=== THE CONVERSATION (round two) ===\n${renderConversation(conversation, units).join("\n")}` : "";
     try {
       const asked = await askJson({
         role: "leader",
         system: synthesisSystem(),
-        user: `MISSION: ${input.mission}\n\nThe workers' checked evidence, and what was rejected:\n\n${evidence}`,
+        user: `MISSION: ${input.mission}\n\nThe workers' checked evidence, and what was rejected:\n\n${evidence}${conversationText}`,
         schema: SynthesisSchema,
         maxTokens: 2200,
         attempts: 2,
@@ -166,18 +191,42 @@ export async function runMission(projectRoot: string, cfg: MissionConfig, input:
     synthesis = fallbackSynthesis(plan, verification);
   }
 
+  // Memory is admitted on the way out, and quality-gated on purpose: a claim needs a quote the server
+  // re-read and a mission that actually closed. Adding everything is a measured way to make the next
+  // mission worse, so the rejected claims are kept too — as things not to say again.
+  let admitted: MemoryItem[] = [];
+  let reinforced = 0;
+  if (cfg.collective.memory) {
+    const recorded = await admitFromMission({
+      root: projectRoot,
+      mission: input.mission,
+      verification,
+      closingRan,
+      conflictPaths: verification.conflicts.map((c) => c.split(" ")[0]),
+      cap: cfg.collective.memoryItems,
+      perMission: 6,
+    });
+    admitted = recorded.added;
+    reinforced = recorded.reinforced;
+    if (recorded.added.length) log(`memory: recorded ${recorded.added.length} entr${recorded.added.length === 1 ? "y" : "ies"} for future missions`);
+    else if (recorded.reinforced) log(`memory: nothing new, but ${recorded.reinforced} earlier entr${recorded.reinforced === 1 ? "y" : "ies"} confirmed again`);
+    warnings.push(...recorded.skipped);
+  }
+
   const stats = {
     workers: units.length,
-    calls: reports.length + failed.length + 1 + (closingRan ? 1 : 0),
+    calls: reports.length + failed.length + 1 + (closingRan ? 1 : 0) + (conversation?.responses.length ?? 0),
     verified: verification.counts.verified,
     rejected: verification.rejected.length,
     contextTokens,
     digestTokens,
     cached: loaded.cached,
     closingRan,
+    peerCalls: conversation?.responses.length ?? 0,
     ms: Date.now() - t0,
   };
-  const dossier = renderDossier({ id, input, index, plan, units, reports, failed, verification, synthesis, stats, warnings });
+  const memoryState = { added: admitted, reinforced, stale: memory.stale, live: memory.live.length };
+  const dossier = renderDossier({ id, input, index, plan, units, reports, failed, verification, synthesis, conversation, memory: memoryState, stats, warnings });
   const dir = missionsDir(projectRoot);
   const file = path.join(dir, `${id}.md`);
   try {
@@ -188,7 +237,7 @@ export async function runMission(projectRoot: string, cfg: MissionConfig, input:
     warnings.push("the dossier could not be written to .design-mcp/collective/ (read-only project?)");
   }
 
-  return { id, file, dossier, plan, verification, synthesis, stats, warnings };
+  return { id, file, dossier, plan, verification, synthesis, conversation, memory: memoryState, stats, warnings };
 }
 
 /** Unit ids must be unique and stable: the reports are matched back to the plan by id. */
@@ -254,6 +303,8 @@ export interface DossierInput {
   failed: { unit: string; error: string }[];
   verification: Verification;
   synthesis: Synthesis;
+  conversation?: PeerRound;
+  memory: { added: MemoryItem[]; reinforced: number; stale: MemoryItem[]; live: number };
   stats: MissionResult["stats"];
   warnings: string[];
 }
@@ -281,13 +332,27 @@ export function renderDossier(d: DossierInput): string {
     "## Evidence (every quote below was re-read from the file by the server)",
     ...v.units.map((u) =>
       [
-        `### ${u.unit} — ${u.role}, ${u.verified}/${u.total} claims verified, verdict ${u.verdict}`,
+        `### ${handleFor(u.role as Unit["role"])} (${u.unit}) — ${u.role}, ${u.verified}/${u.total} claims verified, verdict ${u.verdict}`,
         u.answer,
         ...v.claims.filter((c) => c.unit === u.unit && c.status === "verified").map((c) => `- ${c.path}${c.lines ? `:${c.lines[0]}-${c.lines[1]}` : c.foundAt ? `:~${c.foundAt}` : ""}: ${c.claim}\n    \`${c.quote.replace(/\s+/g, " ").slice(0, 240)}\``),
       ].join("\n")
     ),
     ...(v.rejected.length ? ["", "## Rejected: cited but not found in the file (never build on these)", ...v.rejected.map((c) => `- [${c.status}] ${c.unit} ${c.path}: ${c.claim.replace(/\s+/g, " ").slice(0, 200)}${c.detail ? `\n    ${c.detail}` : ""}`)] : []),
     ...(v.conflicts.length ? ["", "## Conflicts", ...v.conflicts.map((c) => `- ${c}`)] : []),
+    ...(d.conversation ? ["", "## The conversation (round two)", ...renderConversation(d.conversation, d.units)] : []),
+    ...(d.conversation?.responses.some((r) => r.dissent.length)
+      ? ["", "## They do not all agree (unproven dissent, kept for the owner)", ...d.conversation.responses.flatMap((r) => r.dissent.map((x) => `- ${r.unit}: ${x}`))]
+      : []),
+    "",
+    "## Memory",
+    `- ${d.memory.live} entr${d.memory.live === 1 ? "y" : "ies"} from earlier missions were given to this run as hints.`,
+    ...(d.memory.added.length
+      ? ["- recorded for future missions (each carries the quote the server re-read):", ...d.memory.added.map((m) => `    - [${m.kind}] ${m.path ?? ""}: ${m.text.replace(/\s+/g, " ").slice(0, 160)}`)]
+      : d.memory.reinforced
+        ? [`- nothing new, but ${d.memory.reinforced} earlier entr${d.memory.reinforced === 1 ? "y" : "ies"} were confirmed again by this mission.`]
+        : ["- nothing was solid enough to record."]),
+    ...(d.memory.stale.length ? [`- ${d.memory.stale.length} earlier entr${d.memory.stale.length === 1 ? "y" : "ies"} retired: the code they quoted is gone or changed, so they were kept out of every prompt.`] : []),
+    "- Memory is a hint list and never a citation. Nothing in it counts until someone quotes the file again.",
     ...(d.failed.length ? ["", "## Workers that produced nothing usable", ...d.failed.map((f) => `- ${f.unit}: ${f.error.split("\n")[0]}`)] : []),
     "",
     "## Unknowns the collective admitted",
@@ -303,7 +368,13 @@ export function renderDossier(d: DossierInput): string {
     stats.closingRan
       ? `- leader: one planning pass over a ${stats.digestTokens}-token digest computed from the files (no file contents), then one closing pass over the checked findings only.`
       : `- leader: one planning pass over a ${stats.digestTokens}-token digest, with no closing pass (it needs at least one usable worker report). The findings below are unmerged.`,
-    `- workers: ${d.units.map((u) => `${u.id}/${u.role}`).join(", ")} — parallel, no shared context.`,
+    `- workers: ${d.units.map((u) => `${handleFor(u.role)}(${u.id})`).join(", ")} — parallel, no shared context in round one.`,
+    stats.peerCalls
+      ? `- round two: the same copies read each other's verified findings (${stats.peerCalls} replies, quote-checked like everything else). Agreement between copies of one model is not independent evidence and is never counted as verification here.`
+      : "- round two did not run, so no worker saw another's findings.",
+    d.memory.live || d.memory.added.length
+      ? `- memory: ${d.memory.live} live entr${d.memory.live === 1 ? "y" : "ies"} were in front of it at the start (hints, never citations); ${d.memory.added.length} recorded from this mission${d.memory.stale.length ? `; ${d.memory.stale.length} retired as stale` : ""}.`
+      : "- memory: nothing recorded yet from this repository.",
     `- verification: ${v.claims.length} quotes re-read from disk in ${v.ms} ms, ${v.counts.verified} matched at the cited lines, ${v.counts["found-elsewhere"]} matched elsewhere (line numbers wrong), ${v.counts["quote-not-found"]} not found.`,
     `- index: ${idx.totals.files} files, ${stats.cached ? "reused from cache" : `built in ${idx.buildMs} ms`}; ${idx.skipped.length} file(s) skipped.`,
     ...(d.warnings.length ? ["", "## Warnings raised while running", ...[...new Set(d.warnings)].map((w) => `- ${w}`)] : []),

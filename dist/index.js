@@ -25,6 +25,7 @@ import { packContext, renderPack } from "./codebase/pack.js";
 import { estimateTokens, getIndex, renderConventions, renderDigest, renderGraph, renderMap, summarizeIndex } from "./codebase/store.js";
 import { askJson } from "./collective/ask.js";
 import { renderFocusContract } from "./collective/focus.js";
+import { addRuling, clearMemory, loadMemory, renderMemoryReport } from "./collective/memory.js";
 import { LeaderPlanSchema, leaderSystem, leaderUser } from "./collective/roles.js";
 import { listDossiers, loadDossier, runMission } from "./collective/run.js";
 import { STATUS_MEANING, renderVerification, verifyCallerClaims } from "./collective/verify.js";
@@ -711,15 +712,16 @@ server.registerTool("collective_plan", {
 });
 server.registerTool("collective_run", {
     title: "Run the collective on a mission",
-    description: "The full loop, in the background. A leader cuts the mission into units from the digest; the units run in parallel as separate model calls, each on its own token-budgeted pack of real source; the server then re-reads every quote any of them made and deletes the ones that are not in the file; then the leader closes the mission using only what survived, and the dossier names everything left unverified. Returns a job id immediately — poll with design_status. The dossier lands in .design-mcp/collective/<id>.md and is also the job result; read it with collective_report. Workers run on roles.worker (your host model via sampling by default, so no key), one model call per unit.",
+    description: "The full loop, in the background, for one mission: a leader plans from the repo's digest, the units answer in parallel on their own slices of real source, the server re-reads every quote and deletes what does not survive, the copies then read each other's verified findings (round two), the leader closes with what remains, and what was solid enough is remembered for the next mission. Returns a job id immediately — poll with design_status. The dossier lands in .design-mcp/collective/<id>.md, is the job result, and is readable with collective_report: it carries the verified quotes, the rejected claims, the conversation, disagreements nobody settled, and what the run did not check. Workers run on roles.worker (your host model via sampling by default, so no key), one model call per unit plus one for round two.",
     inputSchema: {
         mission: z.string().describe("What needs to be done or understood"),
         focus: z.string().optional(),
         paths: z.array(z.string()).optional(),
         units: z.number().int().min(1).max(12).optional(),
         workers: z.number().int().min(1).max(6).optional().describe("How many units may run at once; defaults to collective.maxWorkers"),
+        peer: z.boolean().optional().describe("Round two: let the units read each other's verified findings and answer with evidence. Defaults to collective.peerRound; costs one extra model call per unit"),
     },
-}, async ({ mission, focus, paths, units, workers }) => {
+}, async ({ mission, focus, paths, units, workers, peer }) => {
     try {
         const { config } = loadConfig();
         for (const role of ["leader", "worker"]) {
@@ -727,7 +729,8 @@ server.registerTool("collective_run", {
                 apiKeyFor(config.roles[role].provider);
         }
         const job = startJob("collective", async (log) => {
-            const r = await runMission(projectDir(), { codebase: config.codebase, collective: config.collective }, { mission, focus, paths, units, workers }, log);
+            const collective = { ...config.collective, ...(peer === undefined ? {} : { peerRound: peer }) };
+            const r = await runMission(projectDir(), { codebase: config.codebase, collective }, { mission, focus, paths, units, workers }, log);
             log(`dossier written to ${path.relative(projectDir(), r.file)}`);
             return [`Dossier: ${path.relative(projectDir(), r.file)}`, `verified ${r.stats.verified} claim(s), rejected ${r.stats.rejected}, ${r.stats.calls} model call(s), ${r.stats.ms} ms`, "", r.dossier].join("\n");
         });
@@ -758,6 +761,33 @@ server.registerTool("collective_report", {
         return fail(e);
     }
 });
+server.registerTool("collective_memory", {
+    title: "What the collective remembers about this repo",
+    description: "The collective's memory between missions: claims whose quote the server itself re-read, claims it rejected (kept so nobody repeats them), and the owner's own rulings. Every quoted entry is re-checked against the file as it is now, and anything whose code has changed or gone is listed as stale and kept out of every prompt — a memory that cannot expire is a memory that will confidently lie. Only quote-verified claims from a mission that reached a conclusion are ever recorded, because adding everything is a measured way to make the next mission worse. Memory is a hint list, never a citation. Also the resource code://memory.",
+    inputSchema: {
+        action: z.enum(["list", "ruling", "forget"]).default("list").describe("list (default), ruling to record the owner's decision, forget to erase it all"),
+        text: z.string().optional().describe("The ruling, required for action=ruling. Say it as a constraint: 'never let the newsletter double-send'"),
+    },
+}, async ({ action, text }) => {
+    try {
+        const { config } = loadConfig();
+        if (action === "forget") {
+            const n = await clearMemory(projectDir());
+            return ok(`Erased ${n} memory entr${n === 1 ? "y" : "ies"}. The collective starts from nothing next mission.`);
+        }
+        if (action === "ruling") {
+            if (!text || text.trim().length < 8)
+                return fail("action=ruling needs `text` with the decision, e.g. 'never let the newsletter double-send'.");
+            const item = await addRuling(projectDir(), text.trim(), config.collective.memoryItems);
+            return ok(`Recorded as a ruling (${item.id}). Rulings are given to the leader and every worker in every future mission, and are never pruned.`);
+        }
+        const loaded = await loadMemory(projectDir());
+        return ok(renderMemoryReport(loaded));
+    }
+    catch (e) {
+        return fail(e);
+    }
+});
 /* ---- resources: the same knowledge, addressable for hosts that attach context ---- */
 server.registerResource("design-playbook", resourceUri("index"), { title: "Design playbook index", description: "Every design-playbook topic and entry, with intents.", mimeType: "text/markdown" }, async (uri) => ({ contents: [{ uri: uri.href, mimeType: "text/markdown", text: topicIndex() }] }));
 for (const topic of TOPICS) {
@@ -783,6 +813,10 @@ codeResource("map", "File and symbol map", "Every indexed file with its declarat
 codeResource("graph", "Import graph", "Who imports what, who would break, and the third-party packages actually imported.", (index) => renderGraph(index));
 codeResource("conventions", "How this project is built", "Package manager, scripts, test files, rule files and everything the index skipped.", (index) => renderConventions(index));
 codeResource("focus", "The focus contract", "How to work in this repository: ground first, cite everything, obey the project's own rules, prove it by running its gates.", (index) => renderFocusContract(index));
+server.registerResource("collective-memory", "code://memory", { title: "What the collective remembers", description: "Established claims, rejected claims and the owner's rulings — each re-checked against the current source, with the stale ones named.", mimeType: "text/markdown" }, async (uri) => {
+    const loaded = await loadMemory(projectDir());
+    return { contents: [{ uri: uri.href, mimeType: "text/markdown", text: renderMemoryReport(loaded) }] };
+});
 /* ---- prompts: the workflows that tie the tools together ---- */
 server.registerPrompt("premium_pass", {
     title: "Premium design pass",

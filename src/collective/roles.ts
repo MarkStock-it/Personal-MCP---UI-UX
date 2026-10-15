@@ -9,6 +9,7 @@
  * the repository.
  */
 import { z } from "zod";
+import { LEADER, PERSONAS, personaBlock, roster } from "./personas.js";
 
 export const WORKER_ROLES = ["explorer", "architect", "implementer", "verifier", "critic"] as const;
 export type WorkerRole = (typeof WORKER_ROLES)[number];
@@ -99,7 +100,9 @@ export const CITATION_CONTRACT = `CITATION CONTRACT (the server enforces this me
   see it in the context, it does not exist for you.`;
 
 export function leaderSystem(maxUnits: number): string {
-  return `You are the LEADER of a collective: several copies of the same model, running in parallel, one mission.
+  return `${personaBlock(LEADER)}
+
+You are the LEADER of a collective: several copies of the same model, running in parallel, one mission.
 You plan. You do not read files, you do not write code, you do not verify anything yourself — the units
 you define are the only work that happens, and each unit's findings come back checked against the source.
 
@@ -115,8 +118,11 @@ How you split work:
 
 ${CITATION_CONTRACT}
 
-Roles available to your units:
-${WORKER_ROLES.map((r) => `- ${r}: ${ROLE_BRIEF[r]}`).join("\n")}
+The seats available to your units — choose the seat each piece of work actually needs:
+${roster()}
+
+What each seat is for:
+${WORKER_ROLES.map((r) => `- ${r} (${PERSONAS[r].handle}): ${ROLE_BRIEF[r]}`).join("\n")}
 
 Reply with a single JSON object, no prose:
 {"restated":"...","risks":["..."],"assumptions":["..."],"unknowns":["..."],
@@ -130,6 +136,8 @@ export interface LeaderUserInput {
   focus?: string;
   paths?: string[];
   maxUnits: number;
+  /** What the collective already established or already got wrong, from earlier missions. */
+  memory?: string;
 }
 
 export function leaderUser(i: LeaderUserInput): string {
@@ -138,6 +146,7 @@ export function leaderUser(i: LeaderUserInput): string {
     i.focus ? `FOCUS (what the owner cares about most): ${i.focus}` : "",
     i.paths?.length ? `FILES THE OWNER ALREADY POINTED AT (they are real; put them in some unit's scope): ${i.paths.join(", ")}` : "",
     `You may define at most ${i.maxUnits} units.`,
+    i.memory ? `\n${i.memory}` : "",
     "",
     "=== REPOSITORY DIGEST (computed from the files, not written by a model) ===",
     i.digest,
@@ -150,11 +159,13 @@ export function leaderUser(i: LeaderUserInput): string {
 }
 
 export function workerSystem(role: WorkerRole): string {
-  return `You are ONE WORKER in a collective: a copy of the same model as the leader and the other workers,
+  return `${personaBlock(PERSONAS[role])}
+
+You are ONE WORKER in a collective: a copy of the same model as the leader and the other workers,
 running in parallel with them. You cannot see their work, their context or their conclusions, and their
 conclusions are not evidence for yours.
 
-Your role is "${role}".
+Your seat is "${role}" (${PERSONAS[role].handle}).
 ${ROLE_BRIEF[role]}
 
 Rules:
@@ -174,13 +185,14 @@ Reply with a single JSON object, no prose:
  "unknowns":["..."],"openQuestions":["..."],"verdict":"ok|risky|blocked"}`;
 }
 
-export function workerUser(unit: Unit, pack: string): string {
+export function workerUser(unit: Unit, pack: string, memory?: string): string {
   return [
     `YOUR UNIT: ${unit.id} (${unit.role})`,
     `OBJECTIVE: ${unit.objective}`,
     unit.scope.length ? `FILES YOU OWN (these are yours; other units have other files): ${unit.scope.join(", ")}` : "FILES YOU OWN: none named — find them from the context and say so.",
     `MUST ANSWER (answer every one of these): ${unit.mustAnswer.map((q) => `\n  - ${q}`).join("")}`,
     unit.doneWhen.length ? `DONE WHEN: ${unit.doneWhen.join("; ")}` : "",
+    memory ? `\n${memory}` : "",
     "",
     "=== PACKED CONTEXT (real source, real line numbers; anything outside it is unknown to you) ===",
     pack,

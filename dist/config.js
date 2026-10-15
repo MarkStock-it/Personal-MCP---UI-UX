@@ -89,6 +89,15 @@ export const ConfigSchema = z.object({
         contextTokensPerWorker: z.number().int().min(500).max(60000).default(4500),
         // One final leader pass that merges only what survived verification.
         synthesize: z.boolean().default(true),
+        // Round two: the workers read each other's VERIFIED findings and must answer with evidence.
+        // Costs one extra model call per unit. Multi-agent debate measurably helps on some tasks and not
+        // others (and agreement between copies of one model is not independent evidence), so this is a
+        // switch rather than a law: turn it off to halve the calls.
+        peerRound: z.boolean().default(true),
+        // What the collective remembers between missions. Only quote-verified claims and rejections get in.
+        memory: z.boolean().default(true),
+        memoryItems: z.number().int().min(10).max(400).default(60),
+        memoryTokensInPrompt: z.number().int().min(0).max(2000).default(400),
         // Keep every mission dossier under .design-mcp/collective/.
         keepDossiers: z.number().int().min(1).max(200).default(20),
     })

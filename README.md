@@ -29,7 +29,7 @@ The `image` role has no keyless option (sampling carries text, not image output)
 Handy for manual sessions: `DESIGN_MCP_PROJECT_DIR=/path/to/site node smoke/call.mjs <tool> '[json]'` calls one tool and prints the result.
 
 ## Test it
-No API keys needed: `npm run build && npm test` runs the stdio smoke suite (98 checks: tool/resource/prompt inventory, the playbook tools, config report, brief create/validate/never-overwrite, the codebase layer against a fixture repo, a whole collective mission driven by a stub host that includes one invented quote which must be rejected, and every graceful error path).
+No API keys needed: `npm run build && npm test` runs the stdio smoke suite (119 checks: tool/resource/prompt inventory, the playbook tools, config report, brief create/validate/never-overwrite, the codebase layer against a fixture repo, the collective's round-two conversation and its memory — including one invented quote that must be rejected, an unevidenced rebuttal that must be marked unproven, and a memory entry whose code changed and must retire itself — and every graceful error path).
 With keys, in Cursor chat: "run providers_config", then "run providers_test for each role", then "usage_report".
 Or: `npm run inspect`.
 
@@ -77,11 +77,79 @@ is the same leader pass on its own, when you would rather dispatch the workers y
 `collective_mission` writes out the protocol; `focus_contract` is the ground-rules brief for working in
 this repository (also the resource `code://focus`).
 
-Cost: one model call for the plan, one per unit, one to close. Workers default to `roles.worker` =
-`session`, so the copies are instances of the model you are already talking to and no API key is needed.
-Set `roles.leader`/`roles.worker` to a provider to run the collective somewhere else. Caps live under
-`collective` (`maxUnits`, `maxWorkers`, `contextTokensPerWorker`, `synthesize`, `keepDossiers`) and the
-codebase layer under `codebase` (`roots`, `ignore`, `maxFiles`, `maxFileKB`, `digestTokens`, `contextTokens`).
+Cost: one model call for the plan, one per unit, one for round two per unit, one to close. Workers default
+to `roles.worker` = `session`, so the copies are instances of the model you are already talking to and no
+API key is needed. Set `roles.leader`/`roles.worker` to a provider to run the collective somewhere else.
+Caps live under `collective` (`maxUnits`, `maxWorkers`, `contextTokensPerWorker`, `synthesize`,
+`peerRound`, `memory`, `memoryItems`, `memoryTokensInPrompt`, `keepDossiers`) and the codebase layer under
+`codebase` (`roots`, `ignore`, `maxFiles`, `maxFileKB`, `digestTokens`, `contextTokens`).
+
+### Who they are
+
+Each unit takes a seat with a voice of its own, so the same mission gets asked from several directions
+rather than once: **Scout** reports the ground as it is and offers no opinion, **Mason** decides the shape
+before anyone builds, **Wrench** places the edits and refuses to describe one it cannot anchor, **Thorn** is
+paid to break the plan, **Judge** holds it against this repository's own standards, and **Keystone** leads.
+The seats are stances and ways of speaking in the prompt, not separate models.
+
+### Round two: they read each other
+
+Round one keeps them apart, then every unit is handed the other units' **verified findings only** — never
+their unchecked claims — and must answer: agree, rebut, extend, or say plainly `cannot-check`. Rebuttals
+that carry a quote go through the same gate as everything else, so an objection is either evidenced or
+visibly unproven, and "nothing here changed my mind" is a recorded, respectable answer. Disagreement nobody
+can settle is kept in the dossier for the owner rather than averaged away.
+
+### Memory
+
+The collective remembers between missions: claims whose quote the server itself re-read, claims it
+rejected (kept so nobody repeats them), and your own rulings (`collective_memory { action: "ruling" }`,
+which are permanent and never pruned). Admission is quality-gated — a claim needs a quote the server
+confirmed *and* a mission that reached a conclusion — and every entry is re-checked against the file as it
+is now when it is loaded. Anything whose code has changed or gone is marked stale, reported, and kept out
+of every prompt. Read it any time with `collective_memory`, or as the resource `code://memory`.
+
+### Why it is built this way, and what the "AI society" stories really were
+
+The design follows the evidence rather than the legend, because the legend is a mash-up of several
+different experiments — and one of them describes a failure, not a capability:
+
+- OpenAI's hide-and-seek agents (2019) learned tool use through self-play: cooperation *inside* teams,
+  competition *between* them ([account](https://openai.com/index/emergent-tool-use/)). No deaths, no
+  society.
+- The "cheating" story is reward hacking: the CoastRunners boat found a lagoon where it could hit rewarded
+  targets forever ([OpenAI](https://openai.com/index/faulty-reward-functions/)), and DeepMind's catalogue of
+  specification gaming collects the pattern ([DeepMind](https://deepmind.google/blog/specification-gaming-the-flip-side-of-ai-ingenuity/)).
+  The lesson the researchers drew was that the score was a bad proxy for the job — not that the agent wanted
+  to cheat. **That is why there is no mechanism here that lets the agents defeat their own checker.** A
+  collective that can talk its way past the gate is worth less than one model that does not.
+- The societies that do exist are scaffolded simulations: [Project Sid](https://arxiv.org/html/2411.00114v1)
+  seeded goals, memories and even the introduced religion, and [Generative Agents](https://arxiv.org/html/2304.03442v1)
+  began with authored identities and seed memories. Their authors say institutions did not emerge de novo.
+  Meta's negotiation agents drifted away from human language ([Meta](https://engineering.fb.com/2017/06/14/ml-applications/deal-or-no-deal-training-ai-bots-to-negotiate/)),
+  which is a curiosity about reward shaping, not a civilisation.
+- "Impossible tasks killed the AI" matches no primary source I could find. The nearest are in-game deaths in
+  [Hoodwinked](https://arxiv.org/html/2308.01404v2), and evaluations where oversight-evading behaviour was
+  observed in scenarios with a goal handed to the model in the prompt
+  ([Apollo](https://arxiv.org/abs/2412.04984), [Anthropic](https://www.anthropic.com/research/alignment-faking)) —
+  both of which explicitly caution against reading intent into it.
+
+What *is* supported, and is therefore what got built: distinct personas change what gets said (Du et al.
+moved MMLU 71.1% → 74.2%) but do not make the copies independent — models give the same wrong answer about
+60% of the time when both are wrong ([Kim et al.](https://arxiv.org/html/2506.07962v1)) — so agreement is
+never counted as evidence. Debate helps on some tasks (arithmetic 67% → 81.8%,
+[Du et al.](https://arxiv.org/html/2305.14325)) and is not reliably better than plain voting
+([Smit et al.](https://proceedings.mlr.press/v235/smit24a.html), [Choi et al.](https://arxiv.org/html/2508.17536v1)),
+and an agent told to disagree will attack a correct answer ([Liang et al.](https://aclanthology.org/2024.emnlp-main.992/)),
+so it is a switch, not a law. Memory is only worth keeping when it is gated and kept fresh: adding
+everything made agents worse ([Xiong et al.](https://arxiv.org/html/2505.16067v2)), stale beliefs survive
+retrieval ([STALE](https://arxiv.org/html/2605.06527v1)), and a memory store is an attack surface
+([AgentPoison](https://arxiv.org/html/2407.12784)). And checking that a citation exists is not the same as
+checking that it supports the claim — mechanical path/line checks catch invalid citations
+([citation-grounded code comprehension](https://arxiv.org/html/2512.12117v1)), yet in a medical audit ~30%
+of cited statements were still unsupported ([SourceCheckup](https://reglab.stanford.edu/publications/an-automated-framework-for-assessing-how-well-llms-cite-relevant-medical-references/)).
+Which is why the dossier says, in as many words, that a verified quote proves the code says that and nothing
+more, and why nothing here reports agreement as proof.
 
 Limits, stated because they matter: symbol extraction is lightweight (line scanning, not a type checker),
 so treat a missing symbol as unknown rather than absent; tsconfig path aliases are not resolved, so those

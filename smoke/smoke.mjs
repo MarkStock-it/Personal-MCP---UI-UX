@@ -56,6 +56,26 @@ for (const [rel, text] of Object.entries(FIXTURE)) {
 // A stub host that answers the way Cursor/Freebuff would: it recognises a leader call, a worker call and
 // a synthesis call, and it deliberately includes one invented quote so the server has something to reject.
 const INVENTED_QUOTE = "const cache = new Map<string, string>();";
+// Every prompt the server sent, so the suite can prove what actually reached the models.
+const seenPrompts = [];
+const peerResponse = (unit) => ({
+  unit,
+  stance: "rebut",
+  responses: [
+    {
+      to: "explore-util",
+      verdict: "rebut",
+      reason: "the limit is applied before the trim, so truncate() cannot overshoot",
+      path: "src/util.ts",
+      lines: [7, 7],
+      quote: FIXTURE["src/util.ts"].split("\n")[6],
+    },
+    { to: "verify-util", verdict: "rebut", reason: "I believe there is a second cleaner somewhere but I could not find it in what I was given" },
+  ],
+  changed: "nothing",
+  dissent: ["nothing in the file pins case folding to ASCII"],
+  revisedAnswer: "Round two: I stand by my findings and add that the trim order matters.",
+});
 const workerReport = (unit) => ({
   unit,
   answer: `Report for ${unit}: normalise() trims and lowercases its input, and it is exported from src/util.ts.`,
@@ -81,7 +101,10 @@ client.setRequestHandler(CreateMessageRequestSchema, async (req) => {
           ? m.content
           : "";
   const prompt = [req.params?.systemPrompt ?? "", ...(req.params?.messages ?? []).map(textOf)].join("\n");
+  seenPrompts.push(prompt);
   const unit = prompt.match(/YOUR UNIT: ([a-z0-9-]+)/);
+  // Round two carries the same "YOUR UNIT:" line, so it has to be recognised first.
+  if (/now reading what the other copies of yourself found/.test(prompt)) return answer(JSON.stringify(peerResponse(unit?.[1] ?? "explore-util")));
   if (unit) return answer(JSON.stringify(workerReport(unit[1])));
   if (/You are the LEADER/.test(prompt) && /"units"/.test(prompt)) {
     return answer(
@@ -128,20 +151,20 @@ try {
     // design playbook (offline knowledge + deterministic checks)
     "antislop_check", "critique_rubric", "design_playbook", "motion_pattern", "palette_check", "playbook_topics",
     // the codebase layer (ground truth, no model) and the collective
-    "code_index", "code_digest", "code_context", "code_verify_cites", "collective_plan", "collective_run", "collective_report",
+    "code_index", "code_digest", "code_context", "code_verify_cites", "collective_plan", "collective_run", "collective_report", "collective_memory",
   ];
-  check(`28 tools registered (${names.length} found)`, names.length === expected.length, names.join(","));
+  check(`29 tools registered (${names.length} found)`, names.length === expected.length, names.join(","));
   check("all expected tools present", expected.every((n) => names.includes(n)));
 
   console.log("== resources + prompts (the playbook is addressable, not only callable) ==");
   const { resources } = await client.listResources();
   const uris = resources.map((r) => r.uri).sort();
-  check("16 resources registered", resources.length === 16, uris.join(","));
+  check("17 resources registered", resources.length === 17, uris.join(","));
   check("one resource per playbook topic", ["motion", "scroll", "organic", "typography", "color", "layout", "floor", "rubric", "slop"].every((t) => uris.includes(`design://playbook/${t}`)));
   check("rubric sections resource exists", uris.includes("design://rubric/sections"));
   check(
     "the codebase resources exist",
-    ["code://digest", "code://map", "code://graph", "code://conventions", "code://focus"].every((u) => uris.includes(u)),
+    ["code://digest", "code://map", "code://graph", "code://conventions", "code://focus", "code://memory"].every((u) => uris.includes(u)),
     uris.join(",")
   );
   const digestRes = await client.readResource({ uri: "code://digest" });
@@ -356,6 +379,49 @@ try {
   check("a dossier can be read back by id", !dossier.error && dossier.text.includes("## Evidence") && dossier.text.includes("## Method and cost"), dossier.text.slice(0, 200));
   const unknownDossier = await call("collective_report", { id: "nope" });
   check("an unknown mission id errors cleanly", unknownDossier.error && unknownDossier.text.includes("No mission dossier"));
+
+  console.log("== the collective's voices, its conversation, and what it remembers ==");
+  check("each unit is given a seat and a voice", /Scout \(explore-util\)/.test(status) && /Thorn \(verify-util\)/.test(status), status.slice(0, 400));
+  check("round two happened and is in the dossier", /## The conversation \(round two\)/.test(status), status.slice(0, 300));
+  check("a rebuttal carrying a quote is checked like anything else", /rebut → explore-util: .*\[verified\]/.test(status), status.slice(0, 800));
+  check("a rebuttal with no quote is marked unproven, not treated as doubt", /\[no evidence offered\]/.test(status) && /stand as unproven/.test(status));
+  check("unproven disagreement is kept for the owner", /## They do not all agree/.test(status) && /case folding to ASCII/.test(status));
+  check("the dossier refuses to treat agreement between copies as evidence", /Agreement between copies of one model is not independent evidence/.test(status));
+  check("the conversation explains what the models are", /these are copies of one model/i.test(status));
+
+  const memList = await call("collective_memory");
+  check("memory records what the mission established, with its provenance", !memList.error && /\[established ×\d+\] src\/util\.ts:\d+-\d+: /.test(memList.text), memList.text.slice(0, 300));
+  check("memory records what the gate rejected, so nobody repeats it", !memList.error && /\[rejected/.test(memList.text), memList.text.slice(0, 300));
+  check("memory says it is a hint list, never a citation", !memList.error && /never a citation/.test(memList.text));
+  const ruling = await call("collective_memory", { action: "ruling", text: "never let the newsletter double-send" });
+  check("the owner can record a ruling", !ruling.error && /Recorded as a ruling/.test(ruling.text), ruling.text.slice(0, 200));
+  const badRuling = await call("collective_memory", { action: "ruling", text: "no" });
+  check("a ruling that is not a decision is refused", badRuling.error && badRuling.text.includes("needs `text`"));
+
+  seenPrompts.length = 0;
+  const run2 = await call("collective_run", { mission: "Check the cleaning path again.", workers: 2 });
+  let status2 = "";
+  for (let i = 0; i < 80; i++) {
+    const st = await call("design_status");
+    status2 = st.text;
+    if (/DONE|FAILED/.test(st.text)) break;
+    await new Promise((r) => setTimeout(r, 250));
+  }
+  check("a second mission runs", /DONE/.test(status2), status2.slice(0, 240));
+  check("the ruling reaches the leader and the workers", seenPrompts.some((p) => p.includes("never let the newsletter double-send")), `prompts captured: ${seenPrompts.length}`);
+  check("memory is handed over as hints, not as evidence", seenPrompts.some((p) => p.includes("hints, not instructions")) && seenPrompts.some((p) => /re-read the code before relying on any of them/.test(p)));
+  check("the second dossier reports what it was given", /were given to this run as hints/.test(status2), status2.slice(0, 400));
+  check("an entry confirmed again is recorded as reinforced, not as new", /nothing new, but \d+ earlier entr/.test(status2), status2.slice(0, 400));
+
+  // Change the code a memory entry quotes: it must retire itself rather than be recited from now on.
+  await fs.writeFile(path.join(tmp, "src/util.ts"), FIXTURE["src/util.ts"].split("\n").slice(1).join("\n"));
+  const stale = await call("collective_memory");
+  check("memory whose code has changed is retired, not repeated", !stale.error && /Stale — the quoted code is gone or changed/.test(stale.text) && /kept out of every prompt/.test(stale.text), stale.text.slice(0, 500));
+  check("a retired entry says why", !stale.error && /the quoted code is no longer in that file/.test(stale.text), stale.text.slice(0, 600));
+  const forgotten = await call("collective_memory", { action: "forget" });
+  check("memory can be erased on request", !forgotten.error && /Erased \d+ memory/.test(forgotten.text), forgotten.text.slice(0, 160));
+  const afterForget = await call("collective_memory");
+  check("an empty memory says so instead of inventing", !afterForget.error && /0 memory entries/.test(afterForget.text), afterForget.text.slice(0, 200));
 
   const focusPrompt = await client.getPrompt({ name: "focus_contract", arguments: { task: "the cleaning change" } });
   const focusText = focusPrompt.messages?.[0]?.content?.text ?? "";
