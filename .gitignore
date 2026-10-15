@@ -1,2 +1,4 @@
 node_modules/
 .DS_Store
+# The server's state dir (index, dossiers, jobs, shots, parked prompts): local to whoever ran it.
+.design-mcp/

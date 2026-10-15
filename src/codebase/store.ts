@@ -278,30 +278,40 @@ export function renderDigest(index: RepoIndex, opts: DigestOptions): string {
     "## How this project is built and run",
     `stack: ${[index.conventions.typescript ? `typescript${index.conventions.tsStrict ? " (strict)" : ""}` : null, index.conventions.moduleSystem, index.conventions.packageManager, ...index.conventions.frameworks].filter(Boolean).join(", ") || "unknown"}`,
     index.conventions.manifestPath ? `manifest: ${index.conventions.manifestPath}${index.conventions.packageName ? ` (${index.conventions.packageName})` : ""}` : "manifest: no package.json anywhere in the indexed files",
-    ...index.conventions.scripts.slice(0, 8).map((s) => `run ${index.conventions.manifestDir ? `in ${index.conventions.manifestDir}/` : ""}: ${s.name} -> \`${s.command}\``),
+    ...index.conventions.scripts.slice(0, 8).map((s) => `run${index.conventions.manifestDir ? ` (in ${index.conventions.manifestDir}/)` : ""}: ${s.name} -> \`${s.command}\``),
     index.conventions.test ? "" : "warning: the nearest package.json declares no test script",
     "",
     "## The project's own rules (read these files in full before changing behaviour)",
     ...index.conventions.notes.map((n) => `- ${n.path} — ${n.heading}`),
     ...(index.entryPoints.length ? ["", "## Entry points", ...index.entryPoints.map((e) => `- ${e.path} — ${e.why}`)] : []),
     ...(index.hotspots.length ? ["", "## Most imported (change these carefully)", ...index.hotspots.slice(0, 8).map((h) => `- ${h.path} — imported by ${h.importedBy}`)] : []),
-    ...(index.conventions.tests.length ? ["", "## Tests", `- ${index.conventions.tests.join("\n- ")}`] : []),
-    ...(index.externals.length ? ["", "## Third-party surface", `- ${index.externals.slice(0, 12).map((e) => `${e.spec} ×${e.count}`).join(", ")}`] : []),
+    ...(index.conventions.tests.length
+      ? ["", "## Tests", `- ${index.conventions.tests.slice(0, 8).join("\n- ")}${index.conventions.tests.length > 8 ? `\n- ... and ${index.conventions.tests.length - 8} more` : ""}`]
+      : []),
+    ...(index.externals.length ? ["", "## Third-party surface", `- ${index.externals.slice(0, 10).map((e) => `${e.spec} ×${e.count}`).join(", ")}`] : []),
     "",
     "## Map (line numbers are real; use them for citations)",
   ];
 
   const budget = opts.tokens;
-  const used = () => estimateTokens([...head, ...map].join("\n"));
+  const TAIL_ALLOWANCE = 70; // tokens for the closing lines, so the total honours the budget
   const map: string[] = [];
   const dropped: string[] = [];
+  const roomForMap = budget - estimateTokens(head.join("\n")) - TAIL_ALLOWANCE;
+  if (roomForMap < 80) {
+    // Be loud about it rather than quietly handing back more tokens than the caller budgeted for.
+    head.push(`note: the sections above (commands, rule files, entry points, tests, third-party surface) already fill the ${budget}-token budget, so no per-file map is included. Raise codebase.digestTokens to see it.`);
+  }
+  let used = 0;
   for (const f of order) {
     const syms = outline(f.symbols.filter((s) => s.exported || s.kind === "heading" || s.kind === "key"), { exportedOnly: true }).slice(0, 12);
     const block = [`### ${f.path}${isTestPath(f.path) ? "  (test)" : ""} — ${f.lines} lines`, ...syms.map((s) => `   ${s}`)];
-    if (used() + estimateTokens(block.join("\n")) > budget) {
+    const cost = estimateTokens(block.join("\n"));
+    if (used + cost > Math.max(0, roomForMap)) {
       dropped.push(f.path);
       continue;
     }
+    used += cost;
     map.push(...block);
   }
 
@@ -309,7 +319,10 @@ export function renderDigest(index: RepoIndex, opts: DigestOptions): string {
     ...(dropped.length ? ["", `${dropped.length} more files did not fit the ${budget}-token budget: ${dropped.slice(0, 20).join(", ")}${dropped.length > 20 ? ", ..." : ""}`] : []),
     ...(index.skipped.length ? ["", `${index.skipped.length} files were skipped by the index: ${index.skipped.slice(0, 6).map((s) => `${s.path} (${s.reason})`).join("; ")}`] : []),
     "",
-    `digest ~${estimateTokens([...head, ...map].join("\n"))} tokens (budget ${budget}, estimate at ~4 chars/token). Symbol lines come from lightweight extraction, not a type checker: treat a missing symbol as unknown, not as absent.`,
+    `digest ~${estimateTokens([...head, ...map].join("\n"))} tokens (budget ${budget}, estimate at ~4 chars/token).`,
+    estimateTokens([...head, ...map].join("\n")) > budget
+      ? `This one is over budget: the fixed sections (how it runs, its rule files, tests, third-party surface) are kept whole on purpose because they change decisions. Raise codebase.digestTokens, or narrow codebase.ignore/roots, to fit the file map in as well.`
+      : "Symbol lines come from lightweight extraction, not a type checker: treat a missing symbol as unknown, not as absent.",
   ];
   return [...head, ...map, ...tail].join("\n");
 }
