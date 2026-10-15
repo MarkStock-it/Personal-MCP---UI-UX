@@ -11,6 +11,7 @@ npm run build          # tsc -> dist/
 npm test               # 50-check keyless stdio suite (smoke/smoke.mjs); no API keys needed
 DESIGN_MCP_PROJECT_DIR=<dir> node smoke/call.mjs <tool> '[json]'   # call one tool
 npm run inspect        # MCP inspector
+npx tsx tools/lab/run.ts   # the memory experiment; see tools/lab/README.md (not a gate)
 ```
 `npm test` is the gate: it asserts the tool/resource/prompt inventory, the playbook tools, the
 deterministic checks and every graceful error path. It must be 50/50 before any change is called done.
@@ -27,6 +28,10 @@ deterministic checks and every graceful error path. It must be 50/50 before any 
   `jobs.ts`, `brief.ts`) — the existing generate-and-test pipeline.
 - `src/test/gates.ts` — the real automated gates. **Any threshold stated in `src/playbook/floor.ts` must
   match the numbers here and the budgets in `src/config.ts`.** If they disagree, fix the playbook.
+- `tools/lab/` — an **experiment, not part of the MCP surface**: does a learned preference layer earn
+  its place, and what would a session save by reading a digest instead of the notes? It reads the two
+  repos, trains a tiny model offline, and prints numbers with intervals. Not covered by the smoke gate.
+  Its README records the method, the results and the rule for when to delete the learner.
 
 ## Adding playbook knowledge
 Every entry carries `sources` with a real URL, the exact licence name and a `change` note. Rules:
