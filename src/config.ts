@@ -45,6 +45,17 @@ export const ConfigSchema = z.object({
       buildTimeoutSec: z.number().int().min(30).default(240),
       firstPort: z.number().int().min(1024).max(65000).default(5201),
       concurrency: z.number().int().min(1).max(6).default(3),
+      // Defaults for sequence_extract (scroll-scrubbed frame sequences). Frames are the expensive asset: ~20 KB each.
+      sequence: z
+        .object({
+          frames: z.number().int().min(24).max(240).default(90),
+          longEdge: z.number().int().min(320).max(2400).default(1280),
+          quality: z.number().int().min(40).max(100).default(80),
+        })
+        .default({}),
+      // Where ffmpeg/ffprobe live, if they are not on PATH.
+      ffmpegPath: z.string().default("ffmpeg"),
+      ffprobePath: z.string().default("ffprobe"),
       // Only these extra npm packages may be added to a variation (supply-chain safety). Edit to allow more.
       extraDependencyAllowlist: z.array(z.string()).default(DEFAULT_ALLOWLIST),
     })
@@ -64,6 +75,10 @@ export const ConfigSchema = z.object({
           p95FrameMs: z.number().default(34),
           lcpMs: z.number().default(2500),
           cls: z.number().default(0.1),
+          // A scroll scene is one asset group and one decoded working set. Both are capped here.
+          sequenceKB: z.number().default(3000),
+          sequenceFrames: z.number().default(180),
+          sequenceDecodeWindowMB: z.number().default(256),
         })
         .default({}),
     })

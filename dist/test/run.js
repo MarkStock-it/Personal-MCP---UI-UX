@@ -2,8 +2,8 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import { loadConfig, projectDir, stateDir } from "../config.js";
 import { serveDir } from "./server.js";
-import { axeGate, basicsGate, contentVisibleGate, focusGate, INIT, loadMetricsGate, overflowGate, reducedMotionGate, runtimeGate, scrollThrough, smoothnessGate, tapTargetGate, tinyTextGate, } from "./gates.js";
-import { weightGate } from "./weight.js";
+import { axeGate, basicsGate, contentVisibleGate, focusGate, INIT, loadMetricsGate, overflowGate, reducedMotionGate, runtimeGate, scrollSceneGate, scrollThrough, smoothnessGate, tapTargetGate, tinyTextGate, } from "./gates.js";
+import { sequenceGate, weightGate } from "./weight.js";
 const strict = (g, cfg) => g.group === "runtime" || cfg.strictGroups.includes(g.group);
 async function launch(cfg) {
     let pw;
@@ -65,7 +65,7 @@ export async function testVariation(o) {
     const shotDir = path.join(stateDir(), "shots", id);
     await fs.rm(shotDir, { recursive: true, force: true });
     await fs.mkdir(shotDir, { recursive: true });
-    const results = [await weightGate(dist, cfg.budgets)];
+    const results = [await weightGate(dist, cfg.budgets), await sequenceGate(dist, cfg.budgets)];
     const shots = [];
     const errors = [];
     const server = await serveDir(dist);
@@ -76,6 +76,7 @@ export async function testVariation(o) {
         const d = await open(browser, server.url, { viewport: { width: 1440, height: 900 } }, errors);
         results.push(await loadMetricsGate(d.page, cfg.budgets));
         results.push(await smoothnessGate(d.page, 900, cfg.budgets)); // also scrolls through, firing all animations
+        results.push(await scrollSceneGate(d.page, 900)); // only meaningful when the page has a scroll sequence
         results.push(await contentVisibleGate(d.page, "desktop"));
         results.push(await basicsGate(d.page));
         results.push(await axeGate(d.page, "desktop"));

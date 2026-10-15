@@ -10,6 +10,7 @@ import { fontsUrl, resolveFontParam } from "./fonts.js";
 import { makePlan } from "./plan.js";
 import { buildSystem } from "./prompts.js";
 import { RESERVED, viteScaffold } from "./scaffold.js";
+import { installSequences, renderSequenceList } from "./sequences.js";
 const msg = (e) => (e instanceof Error ? e.message : String(e));
 const slug = (s) => s.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 30) || "concept";
 /** Call the builder model for files, retrying with feedback until all expected files arrive complete. */
@@ -34,7 +35,7 @@ async function genFiles(ctx, system, user, expected, what) {
     }
     throw new Error(`${what}: the builder model could not return complete files after 3 attempts.`);
 }
-function sharedContext(concept, brief, tokens, images, plan, extraDeps) {
+function sharedContext(concept, brief, tokens, images, sequenceText, plan, extraDeps) {
     const { id: _i, status: _s, ...core } = concept;
     return [
         "APPROVED CONCEPT", JSON.stringify(core, null, 1),
@@ -43,10 +44,11 @@ function sharedContext(concept, brief, tokens, images, plan, extraDeps) {
         images.length
             ? "AVAILABLE IMAGES (use these exact paths)\n" + images.map((i) => `- /images/${i.file} (${i.shape}): ${i.usage}`).join("\n")
             : "AVAILABLE IMAGES: none. Draw everything in SVG/CSS.",
+        sequenceText,
         `INSTALLED EXTRA PACKAGES: ${extraDeps.length ? extraDeps.join(", ") : "none"}`,
         "SITE PLAN, in reading order\n" +
             plan.modules.map((m, i) => `${i + 1}. ${m.name}: ${m.brief}\n   files: ${m.files.map((f) => f.path).join(", ")}\n   copy export in src/content.ts: ${m.contentExport}\n   exports: ${m.exports}`).join("\n"),
-    ].join("\n\n");
+    ].filter(Boolean).join("\n\n");
 }
 async function installAndBuild(ctx, root, tag) {
     const cfg = ctx.cfg;
@@ -120,6 +122,10 @@ export async function buildVariation(o) {
             })));
             images.sort((a, b) => a.file.localeCompare(b.file));
         }
+        // Scroll scenes: sequences prepared in this project are copied in and offered to the builder.
+        const sequences = await installSequences(root);
+        if (sequences.length)
+            log(`scroll sequences: ${sequences.map((s) => `${s.name} (${s.frames} frames)`).join(", ")}`);
         // Scaffold
         const title = brief.project.split(/[:\n]/)[0].replace(/[#*_`]/g, "").trim() || c.name;
         const scaffold = viteScaffold({
@@ -129,7 +135,7 @@ export async function buildVariation(o) {
         await writeFiles(root, scaffold);
         const tokens = scaffold.find((f) => f.path === "src/styles/tokens.css").content;
         const system = buildSystem(rules);
-        const shared = sharedContext(c, brief, tokens, images, plan, plan.extraDependencies);
+        const shared = sharedContext(c, brief, tokens, images, sequences.length ? renderSequenceList(sequences) : "", plan, plan.extraDependencies);
         const written = new Map();
         // 1) Foundation: all copy + global styles
         log("writing copy and global styles");
@@ -215,7 +221,7 @@ export async function buildVariation(o) {
                 return done("failed", "Build failed after repairs:\n" + result.out.slice(0, 1200));
             }
         }
-        await fs.writeFile(path.join(root, "design-mcp.json"), JSON.stringify({ conceptId: c.id, concept: c.name, port, status, files: [...written.keys()], images: images.map((i) => i.file) }, null, 2));
+        await fs.writeFile(path.join(root, "design-mcp.json"), JSON.stringify({ conceptId: c.id, concept: c.name, port, status, files: [...written.keys()], images: images.map((i) => i.file), sequences: sequences.map((s) => s.name) }, null, 2));
         log(`done: ${status}`);
         return done(status);
     }

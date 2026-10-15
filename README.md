@@ -26,7 +26,7 @@ The `image` role has no keyless option (sampling carries text, not image output)
 Handy for manual sessions: `DESIGN_MCP_PROJECT_DIR=/path/to/site node smoke/call.mjs <tool> '[json]'` calls one tool and prints the result.
 
 ## Test it
-No API keys needed: `npm run build && npm test` runs the stdio smoke suite (15 checks: tool list, config report, brief create/validate/never-overwrite, and every graceful error path).
+No API keys needed: `npm run build && npm test` runs the stdio smoke suite (57 checks: tool/resource inventory, the playbook tools, config report, brief create/validate/never-overwrite, and every graceful error path).
 With keys, in Cursor chat: "run providers_config", then "run providers_test for each role", then "usage_report".
 Or: `npm run inspect`.
 
@@ -54,6 +54,22 @@ Safety notes:
 8. `design_report <id>`: shows the saved report. Screenshots land in `.design-mcp/shots/<id>/` (desktop and mobile).
 
 One-time setup: `npm install && npx playwright install chromium`. To use your installed Chrome instead, set `"test": { "channel": "chrome" }` in the config.
+
+## Scroll scenes: the one moment driven by scroll
+A page can have exactly one section where scroll position *drives* the scene instead of revealing it. Three steps:
+
+1. Get a short clip (5-10s). Any local video works: an image-to-video model, a screen recording, a render.
+2. `sequence_extract { video, name }`: samples it into evenly spaced frames, writes a poster still and a manifest to `.design-mcp/sequences/<name>/`, and reports frame count, bytes per frame and the decoded working set against the budgets. It needs ffmpeg (`brew install ffmpeg`); without it the error hands you the exact command to run instead. Encoders differ between ffmpeg builds, so the format is picked from what yours has (WebP, else JPEG, else PNG) and recorded in the manifest.
+3. `design_build`: every variation gets the sequence at `/sequences/<name>/` and may use it once, through the component the scaffold ships (`src/motion/sequence.tsx`, imported by the module that owns the moment). With no sequence prepared, no variation uses one.
+
+What that component guarantees, because these are the parts that go wrong quietly:
+- The poster still stays underneath the canvas: it is the reduced-motion state, the loading state, and the fallback if frames never arrive.
+- Only about ten frames are ever decoded at once (the drawn frame, six ahead, three behind), so memory stays flat however long the sequence is.
+- The poster carries the alt text, the canvas is hidden from the accessibility tree, and the section's copy is real DOM inside the scene.
+- Budgets: `test.budgets.sequenceKB` (frames total), `sequenceFrames`, `sequenceDecodeWindowMB`. Frames too big to fit are re-extracted once at a smaller long edge, and told to you.
+- Two gates check it: the static one verifies the frames that exist and how heavy they are; the runtime one scrolls the page and fails if the frame index does not move. Both are `perf`, so they warn unless you add `"perf"` to `test.strictGroups`.
+
+The technique reference — canvas sequences vs scrubbed video vs CSS scroll timelines, and the numbers behind each — is the playbook topic `scroll` (`design_playbook { topic: "scroll" }` or the resource `design://playbook/scroll`).
 
 ## Phase 5 workflow
 9. `design_critique <id>`: sends the variation's approved concept, its test report and up to 3 screenshots (first desktop, first mobile, last desktop) to the critic model for an art-director review — concept drift first, then what the gates missed. Saved to `.design-mcp/critiques/<id>.md`. Uses critic-model tokens; very long pages may have frames skipped (noted in the output).

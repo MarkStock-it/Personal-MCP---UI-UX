@@ -8,26 +8,43 @@ Node >= 20, TypeScript, ESM. `dist/` is committed because the host runs `dist/in
 ```bash
 npm install
 npm run build          # tsc -> dist/
-npm test               # 50-check keyless stdio suite (smoke/smoke.mjs); no API keys needed
+npm test               # 57-check keyless stdio suite (smoke/smoke.mjs); no API keys needed
 DESIGN_MCP_PROJECT_DIR=<dir> node smoke/call.mjs <tool> '[json]'   # call one tool
 npm run inspect        # MCP inspector
 npx tsx tools/lab/run.ts   # the memory experiment; see tools/lab/README.md (not a gate)
 ```
 `npm test` is the gate: it asserts the tool/resource/prompt inventory, the playbook tools, the
-deterministic checks and every graceful error path. It must be 50/50 before any change is called done.
+deterministic checks and every graceful error path. It must be 57/57 before any change is called done.
 
 ## Map
-- `src/index.ts` — the MCP surface: 14 generating/testing tools, 6 playbook tools, 10 `design://`
+- `src/index.ts` — the MCP surface: 15 generating/testing tools, 6 playbook tools, 11 `design://`
   resources, 2 prompts. Registered at the bottom; the playbook block is clearly marked.
 - `src/playbook/` — the offline knowledge. `types.ts` is the contract (**read it before adding an entry**),
   `index.ts` is the registry/search/render, `check.ts` is deterministic maths (contrast, soft palettes,
-  the anti-slop scanner). Topic modules: motion, organic, typography, color, layout, floor, rubric, slop.
+  the anti-slop scanner). Topic modules: motion, scroll, organic, typography, color, layout, floor, rubric, slop.
 - `src/rules.ts` — the original anti-default list and banned fonts. `src/playbook/slop.ts` builds on it;
   never duplicate those lists.
 - `src/builder/`, `src/providers/`, `src/test/`, `src/critique`-side files (`concepts.ts`, `critic.ts`,
   `jobs.ts`, `brief.ts`) — the existing generate-and-test pipeline.
 - `src/test/gates.ts` — the real automated gates. **Any threshold stated in `src/playbook/floor.ts` must
   match the numbers here and the budgets in `src/config.ts`.** If they disagree, fix the playbook.
+
+## Scroll scenes (the one moment driven by scroll)
+`sequence_extract` turns a local video into the asset a scroll scene needs: evenly sampled frames, a
+poster still and a manifest in `.design-mcp/sequences/<name>/` (`src/builder/sequences.ts` + `src/util/ffmpeg.ts`).
+`installSequences` copies every prepared sequence into each variation as `/sequences/<name>/` and tells the
+builder about it, and the scaffold ships the consumer, `src/motion/sequence.tsx` (sticky viewport, frame
+from scroll progress, poster underneath, decoded window of 10 frames). The builder prompt allows **one**
+scene per site, only with a sequence from that list.
+- ffmpeg is required. Encoders differ per build, so the format is chosen from what `ffmpeg -encoders`
+  reports (libwebp → mjpeg → png) and recorded in the manifest; no WebP encoder means bigger frames, said
+  out loud and fitted to the budget by lowering the long edge once.
+- Gates: `sequenceGate` (static: frame count, naming, poster, poster existence, decoded-window MiB, bytes)
+  and `scrollSceneGate` (runtime: the frame index actually advances with scroll, canvas drawn at device
+  resolution, still present and described). Both are `perf`, so warnings unless `perf` is in `test.strictGroups`.
+- Budgets live in `test.budgets` (`sequenceKB`, `sequenceFrames`, `sequenceDecodeWindowMB`) and the frame
+  format defaults in `build.sequence`. Keep `DECODE_WINDOW` in `sequences.ts` in step with the AHEAD/BEHIND
+  constants in the scaffolded component — the memory budget depends on them.
 - `tools/lab/` — an **experiment, not part of the MCP surface**: does a learned preference layer earn
   its place, and what would a session save by reading a digest instead of the notes? It reads the two
   repos, trains a tiny model offline, and prints numbers with intervals. Not covered by the smoke gate.

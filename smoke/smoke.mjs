@@ -45,18 +45,18 @@ try {
   const names = tools.map((t) => t.name).sort();
   const expected = [
     "brief_check", "brief_init", "concepts_generate", "concepts_review", "design_build", "design_critique", "design_report",
-    "design_status", "design_test", "manual_answer", "manual_pending", "providers_config", "providers_test", "usage_report",
+    "design_status", "design_test", "manual_answer", "manual_pending", "providers_config", "providers_test", "sequence_extract", "usage_report",
     // design playbook (offline knowledge + deterministic checks)
     "antislop_check", "critique_rubric", "design_playbook", "motion_pattern", "palette_check", "playbook_topics",
   ];
-  check(`20 tools registered (${names.length} found)`, names.length === expected.length, names.join(","));
+  check(`21 tools registered (${names.length} found)`, names.length === expected.length, names.join(","));
   check("all expected tools present", expected.every((n) => names.includes(n)));
 
   console.log("== resources + prompts (the playbook is addressable, not only callable) ==");
   const { resources } = await client.listResources();
   const uris = resources.map((r) => r.uri).sort();
-  check("10 design:// resources registered", resources.length === 10, uris.join(","));
-  check("one resource per playbook topic", ["motion", "organic", "typography", "color", "layout", "floor", "rubric", "slop"].every((t) => uris.includes(`design://playbook/${t}`)));
+  check("11 design:// resources registered", resources.length === 11, uris.join(","));
+  check("one resource per playbook topic", ["motion", "scroll", "organic", "typography", "color", "layout", "floor", "rubric", "slop"].every((t) => uris.includes(`design://playbook/${t}`)));
   check("rubric sections resource exists", uris.includes("design://rubric/sections"));
   const readMotion = await client.readResource({ uri: "design://playbook/motion" });
   check("reading a resource returns its content", !!readMotion.contents?.[0]?.text?.includes("Motion"), readMotion.contents?.[0]?.text?.slice(0, 80));
@@ -68,9 +68,13 @@ try {
 
   console.log("== design playbook (offline knowledge, no keys) ==");
   const idx = await call("playbook_topics");
-  check("playbook_topics lists every topic", !idx.error && ["motion", "organic", "typography", "color", "layout", "floor", "rubric", "slop"].every((t) => idx.text.includes(t)), idx.text.slice(0, 120));
+  check("playbook_topics lists every topic", !idx.error && ["motion", "scroll", "organic", "typography", "color", "layout", "floor", "rubric", "slop"].every((t) => idx.text.includes(t)), idx.text.slice(0, 120));
   const topic = await call("design_playbook", { topic: "motion" });
   check("design_playbook reads a topic", !topic.error && topic.text.includes("easing-by-role"), topic.text.slice(0, 100));
+  const scroll = await call("design_playbook", { topic: "scroll" });
+  check("the scroll topic covers techniques, cost and degradation", !scroll.error && ["scrub-sequence-canvas", "css-scroll-timelines", "scroll-scene-floor", "prefers-reduced-motion"].every((s) => scroll.text.includes(s)), scroll.text.slice(0, 120));
+  const scrollEntry = await call("design_playbook", { entry: "scrub-sequence-canvas" });
+  check("a scroll entry states the decoded-memory cost", !scrollEntry.error && /width × height × 4|MiB/.test(scrollEntry.text), scrollEntry.text.slice(0, 120));
   const byEntry = await call("design_playbook", { entry: "displacement-ripples" });
   check("design_playbook fetches an entry by id", !byEntry.error && byEntry.text.includes("Sources:"), byEntry.text.slice(0, 100));
   check("entries show their sources and licences", /\[.*\]/.test(byEntry.text) && /http/.test(byEntry.text));

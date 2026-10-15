@@ -4,9 +4,9 @@ import { loadConfig, projectDir, stateDir, type TestConfig } from "../config.js"
 import { serveDir } from "./server.js";
 import {
   axeGate, basicsGate, contentVisibleGate, focusGate, INIT, loadMetricsGate, overflowGate, reducedMotionGate,
-  runtimeGate, scrollThrough, smoothnessGate, tapTargetGate, tinyTextGate, type GateResult,
+  runtimeGate, scrollSceneGate, scrollThrough, smoothnessGate, tapTargetGate, tinyTextGate, type GateResult,
 } from "./gates.js";
-import { weightGate } from "./weight.js";
+import { sequenceGate, weightGate } from "./weight.js";
 
 export interface TestReport {
   id: string;
@@ -83,7 +83,7 @@ export async function testVariation(o: { root: string; id: string; name: string;
   await fs.rm(shotDir, { recursive: true, force: true });
   await fs.mkdir(shotDir, { recursive: true });
 
-  const results: GateResult[] = [await weightGate(dist, cfg.budgets)];
+  const results: GateResult[] = [await weightGate(dist, cfg.budgets), await sequenceGate(dist, cfg.budgets)];
   const shots: string[] = [];
   const errors: string[] = [];
   const server = await serveDir(dist);
@@ -94,6 +94,7 @@ export async function testVariation(o: { root: string; id: string; name: string;
     const d = await open(browser, server.url, { viewport: { width: 1440, height: 900 } }, errors);
     results.push(await loadMetricsGate(d.page, cfg.budgets));
     results.push(await smoothnessGate(d.page, 900, cfg.budgets)); // also scrolls through, firing all animations
+    results.push(await scrollSceneGate(d.page, 900)); // only meaningful when the page has a scroll sequence
     results.push(await contentVisibleGate(d.page, "desktop"));
     results.push(await basicsGate(d.page));
     results.push(await axeGate(d.page, "desktop"));

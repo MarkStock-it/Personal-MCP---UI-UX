@@ -4,11 +4,13 @@ import { LAYOUT_TOPIC } from "./layout.js";
 import { MOTION_TOPIC } from "./motion.js";
 import { ORGANIC_TOPIC } from "./organic.js";
 import { RUBRIC_TOPIC } from "./rubric.js";
+import { SCROLL_TOPIC } from "./scroll.js";
 import { SLOP_TOPIC } from "./slop.js";
 import { TYPE_TOPIC } from "./typography.js";
 /** Ordered so the index reads the way a design gets built: motion -> material -> type -> colour -> structure -> floor. */
 export const TOPICS = [
     MOTION_TOPIC,
+    SCROLL_TOPIC,
     ORGANIC_TOPIC,
     TYPE_TOPIC,
     COLOR_TOPIC,

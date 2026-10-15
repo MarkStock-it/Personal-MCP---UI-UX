@@ -12,6 +12,7 @@ import { listPending, renderPending, storeAnswer } from "./providers/manual.js";
 import { setSamplingServer } from "./sampling.js";
 import { buildVariation } from "./builder/build.js";
 import { decideStack, detectStack } from "./builder/scaffold.js";
+import { prepareSequence } from "./builder/sequences.js";
 import { getJob, startJob } from "./jobs.js";
 import { pLimit } from "./util/limit.js";
 import { findVariations, loadReport, renderReport, testVariation } from "./test/run.js";
@@ -509,6 +510,40 @@ server.registerTool("antislop_check", {
             findings.length
                 ? `\nNext: fix the ${high} high-severity match(es) first, then run critique_rubric to judge what a pattern scan cannot see.`
                 : "",
+        ].filter(Boolean).join("\n"));
+    }
+    catch (e) {
+        return fail(e);
+    }
+});
+server.registerTool("sequence_extract", {
+    title: "Turn a video into a scroll-scrubbed frame sequence",
+    description: "Builds the asset behind a scroll-linked scene: evenly sampled WebP frames, a poster still and a manifest, written to .design-mcp/sequences/<name>/ and copied into every variation at build time as /sequences/<name>/. Reports frame count, bytes per frame, total weight and the decoded working set against the budgets, and when ffmpeg is missing it says so and hands back the exact command to run instead. Feed it any local clip — from an image-to-video model, a screen recording, or a render — then design_build places it as the one moment the page is driven by scroll rather than merely revealed by it.",
+    inputSchema: {
+        video: z.string().describe("Path to the source clip (mp4, mov, m4v, webm, mkv, avi), relative to the project or absolute"),
+        name: z.string().describe("Sequence name, lowercase-kebab; becomes /sequences/<name>/ in the built site"),
+        frames: z.number().int().min(24).max(240).optional().describe("Frames sampled evenly across the clip. More frames = smoother scrub and more bytes"),
+        longEdge: z.number().int().min(320).max(2400).optional().describe("Long edge of every frame in pixels (default 1280)"),
+        quality: z.number().int().min(40).max(100).optional().describe("WebP quality (default 80)"),
+        overwrite: z.boolean().optional().describe("Replace an existing sequence with the same name"),
+    },
+}, async ({ video, name, frames, longEdge, quality, overwrite }) => {
+    try {
+        const { config } = loadConfig();
+        const r = await prepareSequence({
+            video, name, cfg: config.build, budgets: config.test.budgets, cwd: projectDir(),
+            frames, longEdge, quality, overwrite: !!overwrite,
+        });
+        const kb = (n) => Math.round(n / 1024);
+        return ok([
+            `Sequence "${r.name}" is ready: ${r.frames} ${r.format.toUpperCase()} frames at ${r.width}x${r.height}, ${kb(r.bytes)} KB total (${r.bytesPerFrame} bytes per frame).`,
+            `Decoded working set: about ${Math.round(r.decodeMiB)} MB, the frames the renderer holds at once (budget ${config.test.budgets.sequenceDecodeWindowMB} MB).`,
+            `Stored in .design-mcp/sequences/${r.name}/ (manifest.json, frame-001.webp ... , poster.webp) and copied into every variation as /sequences/${r.name}/.`,
+            `Poster still (the reduced-motion and loading fallback): ${r.poster}`,
+            "",
+            ...r.notes.map((n) => `Note: ${n}`),
+            "Next: design_build. The builder may use ONE scroll scene, through the ScrollSequence component shipped in every variation (src/motion/sequence.tsx).",
+            `Extraction command (for the record): ${r.command}`,
         ].filter(Boolean).join("\n"));
     }
     catch (e) {

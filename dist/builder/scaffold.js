@@ -38,8 +38,213 @@ const quote = (f) => `"${f.replace(/"/g, "")}"`;
 const fallback = (f) => (/mono/i.test(f) ? "ui-monospace, monospace" : "ui-sans-serif, sans-serif");
 export const RESERVED = [
     "package.json", "tsconfig.json", "vite.config.ts", "index.html", "src/main.tsx", "src/vite-env.d.ts",
-    "src/motion/smooth.ts", "src/styles/tokens.css",
+    "src/motion/smooth.ts", "src/motion/sequence.tsx", "src/motion/sequence.css", "src/styles/tokens.css",
 ];
+/**
+ * The scroll-driven frame sequence, shipped with every variation.
+ *
+ * It is deliberately self-contained: frames live in public/sequences/<name>/ with a
+ * manifest.json beside them, scroll progress picks the frame, and only a small window
+ * around the current frame is ever decoded (so memory stays flat however long the
+ * sequence is). The poster stays under the canvas, so the scene reads before the frames
+ * arrive, under prefers-reduced-motion, and if anything fails. A module that ignores it
+ * costs nothing; the frame budget in the test pass only looks at pages that use it.
+ */
+const SEQUENCE_TSX = `import { useEffect, useRef, useState } from "react";
+import type { CSSProperties, ReactNode } from "react";
+import { ScrollTrigger, prefersReducedMotion } from "./smooth";
+import "./sequence.css";
+
+export interface SequenceManifest {
+  /** Total number of frames on disk. */
+  frames: number;
+  /** File-name pattern relative to /sequences/<name>/, printf style, e.g. "frame-%03d.webp". */
+  pattern: string;
+  /** Intrinsic pixel size that every frame shares. */
+  width: number;
+  height: number;
+  /** The still shown before the frames load, and the whole scene under reduced motion. */
+  poster?: string;
+}
+
+const pad = (value: number, width: number) => String(value).padStart(width, "0");
+
+/** URL of one frame. Exported so a scene can preload deliberately if it ever needs to. */
+export function sequenceFrameUrl(name: string, manifest: SequenceManifest, index: number): string {
+  const file = manifest.pattern.replace(/%0?(\\d*)d/, (_match: string, width: string) => pad(index + 1, Number(width) || 1));
+  return "/sequences/" + name + "/" + file;
+}
+
+export function sequencePosterUrl(name: string, manifest?: SequenceManifest | null): string {
+  return "/sequences/" + name + "/" + ((manifest && manifest.poster) || "poster.webp");
+}
+
+const isManifest = (v: unknown): v is SequenceManifest => {
+  const m = v as SequenceManifest;
+  return !!m && typeof m.frames === "number" && m.frames > 1 && typeof m.pattern === "string" && typeof m.width === "number" && typeof m.height === "number";
+};
+
+/**
+ * A scroll-driven frame sequence. The section is one viewport tall plus scrollLength of
+ * travel, the media is sticky inside it, and scroll progress picks the frame.
+ *
+ * Most of the honesty here is in the fallback: the poster is rendered first and never
+ * removed, so the section is complete and still if the frames are slow, disabled by
+ * reduced motion, or missing entirely. Only the drawn frame plus a handful of decoded
+ * neighbours is ever held in memory.
+ */
+export function ScrollSequence(o: {
+  name: string;
+  alt: string;
+  scrollLength?: number;
+  className?: string;
+  children?: ReactNode;
+}) {
+  const root = useRef<HTMLElement | null>(null);
+  const canvas = useRef<HTMLCanvasElement | null>(null);
+  const [manifest, setManifest] = useState<SequenceManifest | null>(null);
+  const [failed, setFailed] = useState(false);
+  const travel = o.scrollLength ?? 140;
+  const name = o.name;
+
+  useEffect(() => {
+    let alive = true;
+    setFailed(false);
+    setManifest(null);
+    fetch("/sequences/" + name + "/manifest.json")
+      .then((r) => (r.ok ? r.json() : Promise.reject(new Error("manifest responded " + r.status))))
+      .then((json: unknown) => { if (!alive) return; if (isManifest(json)) setManifest(json); else setFailed(true); })
+      .catch(() => { if (alive) setFailed(true); });
+    return () => { alive = false; };
+  }, [name]);
+
+  useEffect(() => {
+    const section = root.current;
+    const cv = canvas.current;
+    if (!section || !cv || !manifest || failed || prefersReducedMotion()) return;
+    const ctx = cv.getContext("2d");
+    if (!ctx) return;
+
+    const AHEAD = 6;   // frames decoded ahead of the drawn one
+    const BEHIND = 3;  // frames kept behind it, so scrolling back is instant
+    const frames: (HTMLImageElement | undefined)[] = new Array<HTMLImageElement | undefined>(manifest.frames);
+    let wanted = 0;
+    let drawn = -1;
+
+    const size = () => {
+      const dpr = Math.min(2, window.devicePixelRatio || 1);
+      const w = Math.max(1, Math.round(section.clientWidth * dpr));
+      const h = Math.max(1, Math.round(section.clientHeight * dpr));
+      if (w !== cv.width || h !== cv.height) { cv.width = w; cv.height = h; }
+    };
+
+    const paint = () => {
+      let i = Math.max(0, Math.min(wanted, manifest.frames - 1));
+      while (i > 0 && !(frames[i] && frames[i]!.complete && frames[i]!.naturalWidth)) i--;
+      const el = frames[i];
+      if (!el || !el.complete || !el.naturalWidth) return; // hold whatever is already on screen
+      const s = Math.max(cv.width / el.naturalWidth, cv.height / el.naturalHeight);
+      const w = el.naturalWidth * s;
+      const h = el.naturalHeight * s;
+      ctx.drawImage(el, (cv.width - w) / 2, (cv.height - h) / 2, w, h);
+      if (i !== drawn) { drawn = i; cv.dataset.frame = String(i); }
+    };
+
+    const load = (i: number) => {
+      if (i < 0 || i >= manifest.frames || frames[i]) return;
+      const el = new Image();
+      el.decoding = "async";
+      el.onload = () => { if (i >= wanted - BEHIND && i <= wanted + AHEAD) paint(); };
+      el.src = sequenceFrameUrl(name, manifest, i);
+      frames[i] = el;
+      if (el.decode) el.decode().catch(() => {});
+    };
+
+    const update = () => {
+      size();
+      for (let i = wanted; i <= wanted + AHEAD; i++) load(i);
+      for (let i = 0; i < frames.length; i++) {
+        if (frames[i] && (i < wanted - BEHIND || i > wanted + AHEAD)) { frames[i]!.src = ""; frames[i] = undefined; }
+      }
+      paint();
+    };
+
+    update();
+    const trigger = ScrollTrigger.create({
+      trigger: section,
+      start: "top top",
+      end: "bottom bottom",
+      onUpdate: (self: { progress: number }) => { wanted = Math.round(self.progress * (manifest.frames - 1)); update(); },
+      onRefresh: () => update(),
+    });
+    window.addEventListener("resize", update);
+    ScrollTrigger.refresh();
+    return () => {
+      trigger.kill();
+      window.removeEventListener("resize", update);
+      frames.forEach((el, i) => { if (el) { el.onload = null; el.src = ""; frames[i] = undefined; } });
+    };
+  }, [manifest, failed, name]);
+
+  return (
+    <section ref={root} className={"seq" + (o.className ? " " + o.className : "")} style={{ "--seq-travel": travel + "vh" } as CSSProperties}>
+      <div className="seq__view">
+        {manifest ? (
+          <img
+            className="seq__still"
+            src={sequencePosterUrl(name, manifest)}
+            alt={o.alt}
+            loading="lazy"
+            onError={(e) => { e.currentTarget.style.visibility = "hidden"; }}
+          />
+        ) : null}
+        <canvas className="seq__canvas" ref={canvas} aria-hidden="true" />
+        {o.children ? <div className="seq__overlay">{o.children}</div> : null}
+      </div>
+    </section>
+  );
+}
+`;
+const SEQUENCE_CSS = `/* The scroll scene: one viewport of sticky media plus its travel. Owned by src/motion/sequence.tsx. */
+.seq {
+  position: relative;
+  min-height: calc(100dvh + var(--seq-travel, 140vh));
+}
+
+.seq__view {
+  position: sticky;
+  top: 0;
+  height: 100dvh;
+  overflow: clip;
+}
+
+.seq__still,
+.seq__canvas {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+}
+
+.seq__still { object-fit: cover; }
+
+.seq__canvas {
+  /* On top of the still once frames are drawn; transparent before that. */
+  display: block;
+}
+
+.seq__overlay {
+  position: absolute;
+  inset: auto 0 0 0;
+  display: grid;
+  gap: 0.75rem;
+  padding: clamp(1.25rem, 4vw, 3rem);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .seq { min-height: 100dvh; }
+}
+`;
 export function viteScaffold(o) {
     const p = o.concept.palette;
     const tokens = `:root {
@@ -155,6 +360,8 @@ export function initSmoothScroll(): () => void {
 export { gsap, ScrollTrigger };
 `,
         },
+        { path: "src/motion/sequence.tsx", content: SEQUENCE_TSX },
+        { path: "src/motion/sequence.css", content: SEQUENCE_CSS },
         { path: "src/styles/tokens.css", content: tokens },
     ];
 }

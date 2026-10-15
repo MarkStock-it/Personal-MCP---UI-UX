@@ -280,4 +280,77 @@ export async function smoothnessGate(page, viewportH, b) {
         problems.push(`${long} frames took longer than 100 ms.`);
     return gate("scroll-smoothness", "perf", "Scrolling stays smooth", problems, [`${frames.length} frames, p95 ${p95.toFixed(1)} ms, ${long} long frames. (Headless software rendering is slower than a real GPU.)`]);
 }
+/**
+ * The one claim a screenshot cannot check: that a scroll scene actually moves when the page is
+ * scrolled, and that it has a real still underneath for reduced motion and slow connections.
+ * Quiet on pages with no scene, which is most of them.
+ */
+export async function scrollSceneGate(page, viewportH) {
+    const present = await page.evaluate(() => !!document.querySelector(".seq"));
+    if (!present)
+        return gate("scroll-scene", "perf", "The scroll scene advances", [], ["No scroll sequence on this page."]);
+    const problems = [];
+    const info = [];
+    const still = await page.evaluate(() => {
+        const img = document.querySelector(".seq__still");
+        if (!img)
+            return null;
+        return { src: img.getAttribute("src") ?? "", alt: img.getAttribute("alt") ?? "", complete: img.complete && img.naturalWidth > 0 };
+    });
+    if (!still)
+        problems.push("The scene renders no poster image under the canvas, so reduced motion and slow connections get an empty box.");
+    else {
+        if (!still.src)
+            problems.push("The scene's poster image has no src.");
+        if (still.alt.trim().length < 4)
+            problems.push("The scene's poster image has no meaningful alt text, so the moment has no description for assistive technology.");
+        if (!still.complete)
+            info.push(`The poster (${still.src}) had not finished loading when it was checked.`);
+    }
+    const read = () => page.evaluate(() => {
+        const cv = document.querySelector(".seq__canvas");
+        if (!cv)
+            return null;
+        return { w: cv.width, h: cv.height, frame: cv.dataset.frame ? Number(cv.dataset.frame) : -1 };
+    });
+    const scene = await page.evaluate(() => {
+        const el = document.querySelector(".seq");
+        if (!el)
+            return null;
+        const r = el.getBoundingClientRect();
+        return { top: r.top + window.scrollY, height: Math.round(r.height), travel: getComputedStyle(el).getPropertyValue("--seq-travel").trim() };
+    });
+    if (!scene) {
+        problems.push("The scene element disappeared between checks.");
+        return gate("scroll-scene", "perf", "The scroll scene advances", problems, info);
+    }
+    const first = await read();
+    if (!first)
+        problems.push("The scene has no canvas, so nothing will ever draw.");
+    else if (first.w < 2 || first.h < 2)
+        problems.push("The scene canvas has no backing-store size, so it cannot be drawn at full resolution.");
+    const sampleAt = async (fraction) => {
+        await page.evaluate((y) => window.scrollTo(0, y), Math.max(0, Math.round(scene.top + scene.height * fraction)));
+        await page.waitForTimeout(700);
+        return read();
+    };
+    const early = await sampleAt(0.15);
+    let late = await sampleAt(0.85);
+    for (let i = 0; i < 6 && early && late && late.frame <= early.frame; i++) {
+        await page.waitForTimeout(400);
+        late = await read();
+    }
+    if (early && late) {
+        if (early.frame < 0 || late.frame < 0)
+            problems.push("No frame ever reaches the canvas while scrolling.");
+        else if (late.frame <= early.frame)
+            problems.push(`The scene did not advance with scroll: frame ${early.frame} at 15% of the travel, frame ${late.frame} at 85%.`);
+        else
+            info.push(`Frame ${early.frame} at 15% of the travel, frame ${late.frame} at 85%.`);
+    }
+    if (scene.travel)
+        info.push(`Travel ${scene.travel} over a ${scene.height}px section (viewport ${viewportH}px).`);
+    await page.evaluate(() => window.scrollTo(0, 0));
+    return gate("scroll-scene", "perf", "The scroll scene advances", problems, info);
+}
 export const runtimeGate = (errors) => gate("runtime", "runtime", "No script errors or broken local files", errors.slice(0, 8));

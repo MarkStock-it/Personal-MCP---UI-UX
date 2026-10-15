@@ -3,6 +3,8 @@ export function buildSystem(rulesText) {
 
 A helper already exists: import { gsap, ScrollTrigger, initSmoothScroll, prefersReducedMotion } from "../motion/smooth" (path relative to your file). gsap and ScrollTrigger are already registered. Only App.tsx calls initSmoothScroll(), inside useEffect, returning its cleanup.
 
+A second helper exists for scroll-driven motion: import { ScrollSequence } from "../motion/sequence". It renders a sticky viewport whose frame index follows scroll progress, with a poster still kept underneath for the loading state and for reduced motion. Use it AT MOST ONCE per site, in the section that carries the concept's single strongest moment, and only with a name from the AVAILABLE SCROLL SEQUENCES list — if that list is absent, do not import it at all. Put that section's heading, copy and call to action inside it as children, so the scene always contains real text. Never reimplement the frame logic and never scrub a <video> element when a sequence is available.
+
 DEFAULTS TO AVOID (the client is tired of these):
 ${rulesText}
 
