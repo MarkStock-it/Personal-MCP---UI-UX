@@ -47,6 +47,19 @@ const FIXTURE = {
     "export const clean = (raw: string) => normalise(raw);",
   ].join("\n"),
   "notes.md": "# Fixture notes\n\nThe fixture exists so the index has something real to read.\n",
+  // A skill the owner installed, in the project-local root the defaults look in. The smoke suite proves it
+  // is discovered, readable, and that its text really lands in a worker's prompt when a unit is assigned it.
+  ".claude/skills/make-it-fast/SKILL.md": [
+    "---",
+    "name: make-it-fast",
+    "description: A fixture skill the smoke suite uses to prove skill text reaches a worker's prompt.",
+    "---",
+    "",
+    "# Make it fast",
+    "",
+    "SKILL-BODY-MARKER: measure first, then optimise, then measure again.",
+    "",
+  ].join("\n"),
 };
 for (const [rel, text] of Object.entries(FIXTURE)) {
   await fs.mkdir(path.dirname(path.join(tmp, rel)), { recursive: true });
@@ -114,8 +127,8 @@ client.setRequestHandler(CreateMessageRequestSchema, async (req) => {
         assumptions: ["the repo has no other input cleaner"],
         unknowns: ["what the deletion policy is for anonymous accounts"],
         units: [
-          { id: "explore-util", role: "explorer", objective: "Report exactly what normalise() does today, and which files call it.", scope: ["src/util.ts"], mustAnswer: ["what does normalise(' Foo ') return?"], doneWhen: [] },
-          { id: "verify-util", role: "verifier", objective: "Try to falsify the claim that normalise() is the only place input is cleaned.", scope: ["src/leaky.ts"], mustAnswer: ["who else cleans input?"], doneWhen: [] },
+          { id: "explore-util", role: "explorer", objective: "Report exactly what normalise() does today, and which files call it.", scope: ["src/util.ts"], mustAnswer: ["what does normalise(' Foo ') return?"], doneWhen: [], skill: "make-it-fast" },
+          { id: "verify-util", role: "verifier", objective: "Try to falsify the claim that normalise() is the only place input is cleaned.", scope: ["src/leaky.ts"], mustAnswer: ["who else cleans input?"], doneWhen: [], skill: "a-skill-that-was-never-installed" },
           { id: "ghost", role: "architect", objective: "Design the change inside a file the leader invented from nothing.", scope: ["src/does-not-exist.ts"], mustAnswer: ["where would the edit go?"], doneWhen: [] },
         ],
       })
@@ -152,19 +165,21 @@ try {
     "antislop_check", "critique_rubric", "design_playbook", "motion_pattern", "palette_check", "playbook_topics",
     // the codebase layer (ground truth, no model) and the collective
     "code_index", "code_digest", "code_context", "code_verify_cites", "collective_plan", "collective_run", "collective_report", "collective_memory",
+    // waking the collective, and the owner's own skills
+    "collective_hello", "collective_install", "skills_list", "skills_read",
   ];
-  check(`29 tools registered (${names.length} found)`, names.length === expected.length, names.join(","));
+  check(`33 tools registered (${names.length} found)`, names.length === expected.length, names.join(","));
   check("all expected tools present", expected.every((n) => names.includes(n)));
 
   console.log("== resources + prompts (the playbook is addressable, not only callable) ==");
   const { resources } = await client.listResources();
   const uris = resources.map((r) => r.uri).sort();
-  check("17 resources registered", resources.length === 17, uris.join(","));
+  check("18 resources registered", resources.length === 18, uris.join(","));
   check("one resource per playbook topic", ["motion", "scroll", "organic", "typography", "color", "layout", "floor", "rubric", "slop"].every((t) => uris.includes(`design://playbook/${t}`)));
   check("rubric sections resource exists", uris.includes("design://rubric/sections"));
   check(
     "the codebase resources exist",
-    ["code://digest", "code://map", "code://graph", "code://conventions", "code://focus", "code://memory"].every((u) => uris.includes(u)),
+    ["code://digest", "code://map", "code://graph", "code://conventions", "code://focus", "code://memory", "code://skills"].every((u) => uris.includes(u)),
     uris.join(",")
   );
   const digestRes = await client.readResource({ uri: "code://digest" });
@@ -176,10 +191,10 @@ try {
   const readMotion = await client.readResource({ uri: "design://playbook/motion" });
   check("reading a resource returns its content", !!readMotion.contents?.[0]?.text?.includes("Motion"), readMotion.contents?.[0]?.text?.slice(0, 80));
   const { prompts } = await client.listPrompts();
-  check("4 prompts registered", prompts.length === 4, prompts.map((p) => p.name).join(","));
+  check("5 prompts registered", prompts.length === 5, prompts.map((p) => p.name).join(","));
   check(
-    "premium_pass, motion_review, collective_mission and focus_contract present",
-    ["premium_pass", "motion_review", "collective_mission", "focus_contract"].every((p) => prompts.some((x) => x.name === p))
+    "premium_pass, motion_review, collective_mission, focus_contract and hello_collective present",
+    ["premium_pass", "motion_review", "collective_mission", "focus_contract", "hello_collective"].every((p) => prompts.some((x) => x.name === p))
   );
   const gotPrompt = await client.getPrompt({ name: "premium_pass", arguments: { target: "a landing page" } });
   check("premium_pass embeds the rubric", !!gotPrompt.messages?.[0]?.content?.text?.includes("CRITIQUE RUBRIC"));
@@ -422,6 +437,74 @@ try {
   check("memory can be erased on request", !forgotten.error && /Erased \d+ memory/.test(forgotten.text), forgotten.text.slice(0, 160));
   const afterForget = await call("collective_memory");
   check("an empty memory says so instead of inventing", !afterForget.error && /0 memory entries/.test(afterForget.text), afterForget.text.slice(0, 200));
+
+  console.log("== the owner's skills (found, read, and pasted into a worker when a unit is assigned one) ==");
+  const skills = await call("skills_list");
+  check("skills_list finds the installed skill and its own description", !skills.error && /make-it-fast — A fixture skill\b/.test(skills.text), skills.text.slice(0, 400));
+  check("it says where each skill lives and what goes with it", !skills.error && /SKILL\.md/.test(skills.text) && skills.text.includes(".claude/skills/make-it-fast"), skills.text.slice(0, 400));
+  const skillsQuery = await call("skills_list", { query: "fixture" });
+  check("a filtered listing reports the match count", !skillsQuery.error && /matching "fixture" \(1\)/.test(skillsQuery.text), skillsQuery.text.slice(0, 200));
+  const noSkills = await call("skills_list", { roots: ["nowhere-at-all"] });
+  check("a root with nothing in it explains how to point at your skills", !noSkills.error && /Point `skills.roots`/.test(noSkills.text), noSkills.text.slice(0, 200));
+  const skillText = await call("skills_read", { name: "make-it-fast" });
+  check("skills_read returns the skill in full, with the file it read", !skillText.error && skillText.text.includes("SKILL-BODY-MARKER") && /read in full from .*SKILL\.md/.test(skillText.text), skillText.text.slice(0, 300));
+  check("a skill is labelled as instructions, never as evidence about the code", !skillText.error && /not evidence about this repository/.test(skillText.text) && /cite the code, not the skill/.test(skillText.text));
+  const looseName = await call("skills_read", { name: "fast" });
+  check("a partial name finds the skill instead of failing", !looseName.error && looseName.text.includes("SKILL-BODY-MARKER"));
+  const noSuch = await call("skills_read", { name: "zzz" });
+  check("an unknown skill names what is installed and where it looked", !noSuch.error && /No skill matching "zzz"/.test(noSuch.text) && /Roots searched:/.test(noSuch.text), noSuch.text.slice(0, 300));
+  const skillsRes = await client.readResource({ uri: "code://skills" });
+  check("code://skills reads back the same index", !!skillsRes.contents?.[0]?.text?.includes("make-it-fast"), skillsRes.contents?.[0]?.text?.slice(0, 200));
+  check("a skill the leader assigned reached that worker's prompt", seenPrompts.some((p) => p.includes("SKILL-BODY-MARKER")), `prompts captured: ${seenPrompts.length}`);
+  check("the skill in the prompt is framed as how to work, not as a fact", seenPrompts.some((p) => p.includes("it is not evidence about this") && p.includes("the source wins")));
+  check("a skill was not pasted into units that were not given one", seenPrompts.filter((p) => p.includes("SKILL-BODY-MARKER")).length < seenPrompts.filter((p) => p.includes("YOUR UNIT: ")).length);
+  check("the dossier records which unit followed which skill", /followed the skill "make-it-fast"/.test(status2) && /make-it-fast → explore-util/.test(status2), status2.slice(0, 600));
+  check("the dossier keeps skills away from the evidence", /A skill is how to work, never what is true/.test(status2));
+  check("a skill that cannot be found is a warning, not a silent no-op", /"a-skill-that-was-never-installed", which is not under the configured roots/.test(status2), status2.slice(0, 900));
+
+  console.log("== Hello collective (the session greeting, and making it automatic) ==");
+  const hello = await call("collective_hello");
+  check("the greeting wakes the crew with a roll call", !hello.error && /Keystone \(leader\)/.test(hello.text) && /Scout \(explorer\)/.test(hello.text) && /Judge \(critic\)/.test(hello.text), hello.text.slice(0, 400));
+  check("it names the repo and its size from the index", !hello.error && /\d+ files, \d+ lines, root /.test(hello.text));
+  check("it reports the state of the working tree", !hello.error && /git: (not a git repository|.*)/.test(hello.text), hello.text.slice(0, 400));
+  check("it says what the collective already knows here", !hello.error && /## What the collective already knows about this repo/.test(hello.text));
+  check("it names the open missions on disk", !hello.error && /## Open work/.test(hello.text) && /m-[a-z0-9]+ — /.test(hello.text), hello.text.slice(0, 600));
+  check("it lists the owner's skills", !hello.error && /## Your skills/.test(hello.text) && /make-it-fast/.test(hello.text));
+  check("it carries a digest computed from the files", !hello.error && /## Digest — this repo in ~\d+ tokens/.test(hello.text) && /src\/util\.ts/.test(hello.text) && /notes\.md/.test(hello.text), hello.text.slice(0, 600));
+  check("it costs nothing: no model call, and it says so", !hello.error && /\(\d+ ms, no model call, no API key\.\)/.test(hello.text));
+  check("it tells the assistant not to describe the repo from memory", !hello.error && /never from memory of this repo|Do not invent work and do not describe this repo from memory/.test(hello.text));
+  check("it honours a focus when the owner named one", !(await call("collective_hello", { focus: "the unknown-dossier error" })).error);
+  const helloFocus = await call("collective_hello", { focus: "the unknown-dossier error", budgetTokens: 400 });
+  check("a focus is carried into the greeting and the digest budget is respected", !helloFocus.error && /The owner's focus: the unknown-dossier error/.test(helloFocus.text) && /in ~\d+ tokens/.test(helloFocus.text), helloFocus.text.slice(0, 300));
+  const helloNoSkills = await call("collective_hello", { skills: false });
+  check("the skills scan can be skipped without breaking the greeting", !helloNoSkills.error && /skills scan is off/.test(helloNoSkills.text));
+  const helloPrompt = await client.getPrompt({ name: "hello_collective", arguments: { focus: "the newsletter" } });
+  const helloPromptText = helloPrompt.messages?.[0]?.content?.text ?? "";
+  check("the hello_collective prompt starts with the owner's words and calls the tool", /Hello collective\./.test(helloPromptText) && /Call `collective_hello`/.test(helloPromptText));
+  check("it forbids answering this repo from memory", /Do not describe this repository from memory/.test(helloPromptText));
+
+  console.log("== collective_install (the session block, and undoing it) ==");
+  await fs.writeFile(path.join(tmp, "AGENTS.md"), "# Fixture notes\n\nA hand-written line this repo already had.\n");
+  const beforeInstall = await fs.readFile(path.join(tmp, "AGENTS.md"), "utf8");
+  const shown = await call("collective_install", { action: "show" });
+  check("action=show previews without writing", !shown.error && /Preview only \(action=show\): nothing was written/.test(shown.text), shown.text.slice(0, 300));
+  check("the preview says what install would do, and the file is untouched", !shown.error && /the block was appended/.test(shown.text) && (await fs.readFile(path.join(tmp, "AGENTS.md"), "utf8")) === beforeInstall, shown.text.slice(0, 300));
+  const installed = await call("collective_install");
+  const agents = await fs.readFile(path.join(tmp, "AGENTS.md"), "utf8");
+  check("install adds the block to the repo's instruction file", !installed.error && /the block was appended/.test(installed.text), installed.text.slice(0, 300));
+  check("it tells the host to call collective_hello at session start", agents.includes("collective_hello") && agents.includes("Hello collective."));
+  check("the hand-written text above it is untouched", agents.includes("A hand-written line this repo already had.") && agents.startsWith(beforeInstall));
+  check("it explains what it cannot do: a server may not speak first", !installed.error && /does not make the server speak first/.test(installed.text) && /removing the block restores the file/.test(installed.text));
+  const reinstalled = await call("collective_install");
+  const agentsAgain = await fs.readFile(path.join(tmp, "AGENTS.md"), "utf8");
+  check("installing twice writes nothing the second time", !reinstalled.error && /already up to date/.test(reinstalled.text), reinstalled.text.slice(0, 240));
+  check("the file is byte-identical after the second install", agentsAgain === agents);
+  const removed = await call("collective_install", { action: "remove" });
+  const afterRemove = await fs.readFile(path.join(tmp, "AGENTS.md"), "utf8");
+  check("remove takes exactly the block back out", !removed.error && /the block was removed/.test(removed.text) && !afterRemove.includes("design-mcp:collective:start"));
+  check("the repo's own text survives the removal", afterRemove.includes("A hand-written line this repo already had."), afterRemove.slice(0, 200));
+  const freshInstall = await call("collective_install", { create: false, targets: ["NOPE.md"] });
+  check("it will not invent a file when told not to", !freshInstall.error && /Nothing changed/.test(freshInstall.text), freshInstall.text.slice(0, 240));
 
   const focusPrompt = await client.getPrompt({ name: "focus_contract", arguments: { task: "the cleaning change" } });
   const focusText = focusPrompt.messages?.[0]?.content?.text ?? "";

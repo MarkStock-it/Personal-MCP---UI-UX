@@ -27,6 +27,16 @@ const HOST_TEXT = { provider: "session" as const, model: "host-default" };
 
 const TestGroup = z.enum(["mobile", "a11y", "perf"]);
 
+/** Where installed skills live. `~` is the home dir; the rest resolve inside the project. */
+const DEFAULT_SKILL_ROOTS = [
+  "~/.config/freebuff-desktop/account-skills",
+  "~/.claude/skills",
+  "~/.codex/skills",
+  ".claude/skills",
+  ".cursor/skills",
+  "skills",
+];
+
 const DEFAULT_IGNORE = [
   "node_modules", ".git", ".cache", "dist", "build", "out", "coverage", "vendor", "target",
   ".next", ".nuxt", ".svelte-kit", ".vercel", ".turbo", ".venv", "venv", "__pycache__",
@@ -88,6 +98,15 @@ export const ConfigSchema = z.object({
       contextTokens: z.number().int().min(500).max(60000).default(6000),
     })
     .default({}),
+  // Skills you installed (SKILL.md collections). Discovered and read here; never executed by this server.
+  skills: z
+    .object({
+      enabled: z.boolean().default(true),
+      roots: z.array(z.string()).default(DEFAULT_SKILL_ROOTS),
+      maxSkillKB: z.number().int().min(4).max(2048).default(256),
+      maxInPromptKB: z.number().int().min(2).max(64).default(16),
+    })
+    .default({}),
   collective: z
     .object({
       // Hard cap on workstreams the leader may split a mission into.
@@ -140,6 +159,7 @@ export type BuildConfig = Config["build"];
 export type TestConfig = Config["test"];
 export type CodebaseConfig = Config["codebase"];
 export type CollectiveConfig = Config["collective"];
+export type SkillsConfig = Config["skills"];
 
 export function projectDir(): string {
   return path.resolve(process.env.DESIGN_MCP_PROJECT_DIR ?? process.cwd());

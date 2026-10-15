@@ -34,6 +34,8 @@ const UnitSchema = z.object({
   scope: z.array(z.string()).max(12).default([]),
   mustAnswer: z.array(z.string().min(5)).min(1).max(6),
   doneWhen: z.array(z.string().min(5)).max(6).default([]),
+  /** A skill the owner installed, by name. Its full text is pasted into that unit's prompt, or dropped if the file cannot be read. */
+  skill: z.string().max(80).optional(),
 });
 export type Unit = z.infer<typeof UnitSchema>;
 
@@ -99,7 +101,7 @@ export const CITATION_CONTRACT = `CITATION CONTRACT (the server enforces this me
 - Never invent a file, path, function, export, config key, script name or command line. If you did not
   see it in the context, it does not exist for you.`;
 
-export function leaderSystem(maxUnits: number): string {
+export function leaderSystem(maxUnits: number, skills?: string): string {
   return `${personaBlock(LEADER)}
 
 You are the LEADER of a collective: several copies of the same model, running in parallel, one mission.
@@ -120,6 +122,12 @@ ${CITATION_CONTRACT}
 
 The seats available to your units — choose the seat each piece of work actually needs:
 ${roster()}
+${skills ? `
+Skills the owner installed. A skill is instructions, not a tool: naming one on a unit ("skill":"its name")
+pastes its text into THAT worker's prompt and nothing else. Assign one when the work is exactly what the
+skill is for — say which unit and why in the objective — and never assign one whose name is not on this
+list, because a skill that cannot be found is dropped and the unit runs without it.
+${skills}` : ""}
 
 What each seat is for:
 ${WORKER_ROLES.map((r) => `- ${r} (${PERSONAS[r].handle}): ${ROLE_BRIEF[r]}`).join("\n")}
@@ -158,7 +166,7 @@ export function leaderUser(i: LeaderUserInput): string {
     .join("\n");
 }
 
-export function workerSystem(role: WorkerRole): string {
+export function workerSystem(role: WorkerRole, skill?: { name: string; path: string; text: string }): string {
   return `${personaBlock(PERSONAS[role])}
 
 You are ONE WORKER in a collective: a copy of the same model as the leader and the other workers,
@@ -176,7 +184,15 @@ Rules:
 - "verdict" is "blocked" when the context was not enough to answer at all, "risky" when you answered but
   the answer rests on something you could not see.
 
-${CITATION_CONTRACT}
+${skill ? `
+=== A SKILL THE LEADER ASSIGNED TO YOUR UNIT ===
+${skill.name} (from ${skill.path}). Follow it as instructions for HOW you work; it is not evidence about this
+repository. Nothing in it may be cited as a fact about this code — the citation contract above still governs
+every claim you make, so if the skill and the source disagree, the source wins and you say so.
+---
+${skill.text}
+---
+` : ""}${CITATION_CONTRACT}
 
 Reply with a single JSON object, no prose:
 {"unit":"<the unit id you were given>","answer":"...",

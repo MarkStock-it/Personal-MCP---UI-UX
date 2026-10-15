@@ -20,6 +20,7 @@ import { LeaderPlanSchema, SynthesisSchema, WorkerReportSchema, leaderSystem, le
 import { admitFromMission, loadMemory, renderMemoryBlock } from "./memory.js";
 import { renderConversation, runPeerRound } from "./peer.js";
 import { handleFor } from "./personas.js";
+import { discoverSkills, findSkill, readSkill } from "../skills/index.js";
 import { verifyReports } from "./verify.js";
 export const missionsDir = (root) => path.join(root, ".design-mcp", "collective");
 export async function runMission(projectRoot, cfg, input, log) {
@@ -37,10 +38,27 @@ export async function runMission(projectRoot, cfg, input, log) {
     if (memory.live.length || memory.stale.length) {
         log(`memory: ${memory.live.length} live entr${memory.live.length === 1 ? "y" : "ies"} in front of the collective${memory.stale.length ? `, ${memory.stale.length} retired as stale` : ""}`);
     }
+    // The owner's skills. Only their names and one-line intents go to the leader; the text itself is read
+    // later, and only for the units that were actually assigned one, so an unused skill costs nothing.
+    const scan = cfg.skills.enabled ? await discoverSkills(projectRoot, cfg.skills) : { skills: [], roots: [], notes: [] };
+    const offered = input.skills?.length
+        ? scan.skills.filter((s) => input.skills.some((n) => s.name.toLowerCase() === n.toLowerCase()))
+        : scan.skills;
+    if (input.skills?.length) {
+        const missing = input.skills.filter((n) => !offered.some((s) => s.name.toLowerCase() === n.toLowerCase()));
+        if (missing.length)
+            warnings.push(`skill(s) asked for but not found under the configured roots: ${missing.join(", ")}`);
+    }
+    const skillIndex = offered.length
+        ? offered.slice(0, 40).map((s) => `- ${s.name} — ${s.description.replace(/\s+/g, " ").slice(0, 180)}`).join("\n")
+        : "";
+    if (offered.length)
+        log(`skills: ${offered.length} of the owner's skills offered to the leader${scan.skills.length - offered.length ? ` (${scan.skills.length - offered.length} not shortlisted)` : ""}`);
+    warnings.push(...scan.notes);
     const maxUnits = Math.min(cfg.collective.maxUnits, input.units ?? cfg.collective.maxUnits);
     const planAsk = await askJson({
         role: "leader",
-        system: leaderSystem(maxUnits),
+        system: leaderSystem(maxUnits, skillIndex || undefined),
         user: leaderUser({ mission: input.mission, digest, focus: input.focus, paths: input.paths, maxUnits, memory: memoryBlock }),
         schema: LeaderPlanSchema,
         maxTokens: 2200,
@@ -59,6 +77,26 @@ export async function runMission(projectRoot, cfg, input, log) {
     }));
     if (!units.some((u) => u.role === "verifier"))
         warnings.push("the leader did not include a verifier unit, so nothing is trying to falsify the plan");
+    // Resolve the assigned skills before anything is dispatched: a skill whose file cannot be read is a
+    // defect in the plan, and it is cheaper to say so here than to let a worker run under a false premise.
+    const assigned = new Map();
+    for (const u of units) {
+        if (!u.skill)
+            continue;
+        const found = findSkill(offered, u.skill);
+        if (!found) {
+            warnings.push(`unit ${u.id} was assigned skill "${u.skill}", which is not under the configured roots, so the unit ran without it`);
+            continue;
+        }
+        try {
+            const text = await readSkill(found, cfg.skills.maxInPromptKB);
+            assigned.set(u.id, { name: found.name, path: found.path, text, bytes: text.length });
+            log(`  ${u.id}: following the owner's skill "${found.name}" (${Math.round(text.length / 1024)} KB read into its prompt)`);
+        }
+        catch (e) {
+            warnings.push(`unit ${u.id} could not read the skill "${u.skill}": ${e instanceof Error ? e.message : String(e)}`);
+        }
+    }
     const workerCount = Math.min(cfg.collective.maxWorkers, input.workers ?? cfg.collective.maxWorkers, Math.max(1, units.length));
     const limit = pLimit(workerCount);
     let contextTokens = 0;
@@ -78,7 +116,7 @@ export async function runMission(projectRoot, cfg, input, log) {
         try {
             const asked = await askJson({
                 role: "worker",
-                system: workerSystem(unit.role),
+                system: workerSystem(unit.role, assigned.get(unit.id)),
                 user: workerUser(unit, renderPack(pack), memoryBlock),
                 schema: WorkerReportSchema,
                 maxTokens: 2600,
@@ -180,7 +218,11 @@ export async function runMission(projectRoot, cfg, input, log) {
         ms: Date.now() - t0,
     };
     const memoryState = { added: admitted, reinforced, stale: memory.stale, live: memory.live.length };
-    const dossier = renderDossier({ id, input, index, plan, units, reports, failed, verification, synthesis, conversation, memory: memoryState, stats, warnings });
+    const skillsUsed = units.flatMap((u) => {
+        const a = assigned.get(u.id);
+        return a ? [{ name: a.name, unit: u.id, path: a.path, bytes: a.bytes }] : [];
+    });
+    const dossier = renderDossier({ id, input, index, plan, units, reports, failed, verification, synthesis, conversation, memory: memoryState, skills: skillsUsed, offered: offered.map((s) => s.name), stats, warnings });
     const dir = missionsDir(projectRoot);
     const file = path.join(dir, `${id}.md`);
     try {
@@ -191,7 +233,7 @@ export async function runMission(projectRoot, cfg, input, log) {
     catch {
         warnings.push("the dossier could not be written to .design-mcp/collective/ (read-only project?)");
     }
-    return { id, file, dossier, plan, verification, synthesis, conversation, memory: memoryState, stats, warnings };
+    return { id, file, dossier, plan, verification, synthesis, conversation, memory: memoryState, skills: skillsUsed, stats, warnings };
 }
 /** Unit ids must be unique and stable: the reports are matched back to the plan by id. */
 function dedupeUnits(units) {
@@ -263,7 +305,7 @@ export function renderDossier(d) {
         "",
         "## Evidence (every quote below was re-read from the file by the server)",
         ...v.units.map((u) => [
-            `### ${handleFor(u.role)} (${u.unit}) — ${u.role}, ${u.verified}/${u.total} claims verified, verdict ${u.verdict}`,
+            `### ${handleFor(u.role)} (${u.unit}) — ${u.role}, ${u.verified}/${u.total} claims verified, verdict ${u.verdict}${d.skills.find((s) => s.unit === u.unit) ? `, followed the skill "${d.skills.find((s) => s.unit === u.unit).name}"` : ""}`,
             u.answer,
             ...v.claims.filter((c) => c.unit === u.unit && c.status === "verified").map((c) => `- ${c.path}${c.lines ? `:${c.lines[0]}-${c.lines[1]}` : c.foundAt ? `:~${c.foundAt}` : ""}: ${c.claim}\n    \`${c.quote.replace(/\s+/g, " ").slice(0, 240)}\``),
         ].join("\n")),
@@ -272,6 +314,18 @@ export function renderDossier(d) {
         ...(d.conversation ? ["", "## The conversation (round two)", ...renderConversation(d.conversation, d.units)] : []),
         ...(d.conversation?.responses.some((r) => r.dissent.length)
             ? ["", "## They do not all agree (unproven dissent, kept for the owner)", ...d.conversation.responses.flatMap((r) => r.dissent.map((x) => `- ${r.unit}: ${x}`))]
+            : []),
+        "",
+        ...(d.offered.length
+            ? [
+                "",
+                "## Skills (the owner's own instructions, offered to the leader)",
+                `- offered for assignment: ${d.offered.slice(0, 20).join(", ")}${d.offered.length > 20 ? ` (and ${d.offered.length - 20} more)` : ""}`,
+                ...(d.skills.length
+                    ? d.skills.map((s) => `- ${s.unit} followed **${s.name}** — ${Math.round(s.bytes / 1024)} KB of its text was in that worker's prompt (${s.path})`)
+                    : ["- the leader assigned none of them, so no skill text reached any prompt."]),
+                "- A skill is how to work, never what is true: it cannot be cited as a fact about this code, and nothing it says was checked against the source.",
+            ]
             : []),
         "",
         "## Memory",
@@ -305,6 +359,7 @@ export function renderDossier(d) {
         d.memory.live || d.memory.added.length
             ? `- memory: ${d.memory.live} live entr${d.memory.live === 1 ? "y" : "ies"} were in front of it at the start (hints, never citations); ${d.memory.added.length} recorded from this mission${d.memory.stale.length ? `; ${d.memory.stale.length} retired as stale` : ""}.`
             : "- memory: nothing recorded yet from this repository.",
+        d.skills.length ? `- skills: ${d.skills.map((s) => `${s.name} → ${s.unit}`).join(", ")} (read from disk into that worker's prompt; not evidence).` : "- skills: none assigned by the leader.",
         `- verification: ${v.claims.length} quotes re-read from disk in ${v.ms} ms, ${v.counts.verified} matched at the cited lines, ${v.counts["found-elsewhere"]} matched elsewhere (line numbers wrong), ${v.counts["quote-not-found"]} not found.`,
         `- index: ${idx.totals.files} files, ${stats.cached ? "reused from cache" : `built in ${idx.buildMs} ms`}; ${idx.skipped.length} file(s) skipped.`,
         ...(d.warnings.length ? ["", "## Warnings raised while running", ...[...new Set(d.warnings)].map((w) => `- ${w}`)] : []),

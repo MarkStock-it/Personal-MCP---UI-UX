@@ -20,6 +20,15 @@ const DEFAULT_TEXT = { provider: "anthropic", model: "claude-sonnet-5-5" };
 // anthropic/openai/google instead to run the collective on a separate model.
 const HOST_TEXT = { provider: "session", model: "host-default" };
 const TestGroup = z.enum(["mobile", "a11y", "perf"]);
+/** Where installed skills live. `~` is the home dir; the rest resolve inside the project. */
+const DEFAULT_SKILL_ROOTS = [
+    "~/.config/freebuff-desktop/account-skills",
+    "~/.claude/skills",
+    "~/.codex/skills",
+    ".claude/skills",
+    ".cursor/skills",
+    "skills",
+];
 const DEFAULT_IGNORE = [
     "node_modules", ".git", ".cache", "dist", "build", "out", "coverage", "vendor", "target",
     ".next", ".nuxt", ".svelte-kit", ".vercel", ".turbo", ".venv", "venv", "__pycache__",
@@ -78,6 +87,15 @@ export const ConfigSchema = z.object({
         digestTokens: z.number().int().min(400).max(20000).default(2500),
         // How much source one packed context answer (one worker, one question) may contain.
         contextTokens: z.number().int().min(500).max(60000).default(6000),
+    })
+        .default({}),
+    // Skills you installed (SKILL.md collections). Discovered and read here; never executed by this server.
+    skills: z
+        .object({
+        enabled: z.boolean().default(true),
+        roots: z.array(z.string()).default(DEFAULT_SKILL_ROOTS),
+        maxSkillKB: z.number().int().min(4).max(2048).default(256),
+        maxInPromptKB: z.number().int().min(2).max(64).default(16),
     })
         .default({}),
     collective: z

@@ -1,4 +1,4 @@
-# design-mcp (Phase 6: your own assistant as the model; Phase 7: the codebase layer and the collective)
+# design-mcp (Phase 6: your own assistant as the model; Phase 7: the codebase layer and the collective; Phase 8: "Hello collective." and your own skills)
 
 Switchable text + image provider layer behind an MCP server. Design generation arrives in later phases.
 
@@ -29,7 +29,7 @@ The `image` role has no keyless option (sampling carries text, not image output)
 Handy for manual sessions: `DESIGN_MCP_PROJECT_DIR=/path/to/site node smoke/call.mjs <tool> '[json]'` calls one tool and prints the result.
 
 ## Test it
-No API keys needed: `npm run build && npm test` runs the stdio smoke suite (119 checks: tool/resource/prompt inventory, the playbook tools, config report, brief create/validate/never-overwrite, the codebase layer against a fixture repo, the collective's round-two conversation and its memory — including one invented quote that must be rejected, an unevidenced rebuttal that must be marked unproven, and a memory entry whose code changed and must retire itself — and every graceful error path).
+No API keys needed: `npm run build && npm test` runs the stdio smoke suite (159 checks: tool/resource/prompt inventory, the playbook tools, config report, brief create/validate/never-overwrite, the codebase layer against a fixture repo, the collective's round-two conversation and its memory — including one invented quote that must be rejected, an unevidenced rebuttal that must be marked unproven, and a memory entry whose code changed and must retire itself — and every graceful error path).
 With keys, in Cursor chat: "run providers_config", then "run providers_test for each role", then "usage_report".
 Or: `npm run inspect`.
 
@@ -158,6 +158,55 @@ from it is correct. That is what the project's own gates are for — which the d
 
 Server state (index, dossiers, jobs, shots, parked prompts) all lives under `.design-mcp/` in the project
 being worked on, so add it to that project's `.gitignore`.
+
+Configuration for the two phases above lives under `skills` (`enabled`, `roots`, `maxSkillKB`,
+`maxInPromptKB`) alongside the `codebase` and `collective` blocks in `src/config.ts`.
+
+## Phase 8: "Hello collective." — and your own skills
+
+Open a session in a repository where this server is available, say **"Hello collective."**, and the crew is
+already standing in the repo. `collective_hello` answers in one pass — **no model call, no API key, ~140 ms**
+measured on the two-repo checkout this was built against — with: the roll call of seats; the state of the git
+tree; what the collective already established here and what it already got wrong (stale entries named); the
+recent mission dossiers; your installed skills; the digest of the repo computed from its files; and the exact
+next steps, so the answer is grounded rather than improvised. The prompt `hello_collective` is the same
+invocation for hosts that only honour prompts.
+
+It is cheap because it runs at the top of every session, and it is honest about one thing in particular:
+
+> **An MCP server cannot speak first.** Nothing in the protocol lets the collective push a message into a
+> conversation that has not called it, so "it runs every time I open a new session" cannot be done from the
+> server side alone. It is carried by the one thing a host already reads on its own: the repository's own
+> instruction file.
+
+`collective_install` writes one short marked block into `AGENTS.md` (and `CLAUDE.md`, when the repo has one)
+telling the host to call `collective_hello` at the start of a session in that repo and whenever you say
+"Hello collective.". It is idempotent (a second install writes nothing), it never touches a character
+outside its own markers, `action: "show"` previews without writing, and `action: "remove"` takes it back
+out. If your host ignores instruction files, the block is inert and the greeting still works the moment
+anything calls it — and if you have no API keys at all, none of this needs one.
+
+### Your skills, and what "run a skill" can honestly mean
+
+`skills_list` (resource `code://skills`) finds every `SKILL.md` under `skills.roots` — by default your
+Freebuff account skills plus the usual `~/.claude/skills`, `~/.codex/skills` and project `.claude/skills`,
+`.cursor/skills`, `skills` folders. On the machine this was written on it finds 37 distinct skills in ~140 ms
+(duplicate copies of a name are reported as one skill, with the other paths named). `skills_read` returns one
+in full, and `code://skills` lists them all.
+
+A skill is **instructions**, not a tool, and not evidence. So:
+
+- A collective unit is assigned one with `skill` on the plan (or `skills` on `collective_run` to choose which
+  the leader may offer). The text is read at dispatch time — only for the units that were actually assigned
+  it — and goes into that worker's prompt, where it is labelled as *how to work*, never as *what is true*:
+  nothing in a skill can be cited as a fact about your code, and if the skill and the source disagree, the
+  source wins. The dossier records which unit followed which skill, and a skill the leader names that cannot
+  be found is a warning rather than a silent no-op.
+- **Nothing executes a skill.** Not the discovery, not the assignment, not the mission. This server will walk
+  your directories and paste text into a prompt; it will not run the commands a skill suggests, because a
+  tool that runs whatever a model asks it to run is a hole in every project the server is pointed at. The
+  execution stays with the host that already has a terminal and your approval — which is also how skills are
+  meant to work: the model reads the instructions and then does the work itself.
 
 ## Phase 2 workflow
 1. `brief_init`: creates `brief.md` in your project. Fill it in.

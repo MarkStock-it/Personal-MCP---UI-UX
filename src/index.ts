@@ -29,12 +29,15 @@ import { renderFocusContract } from "./collective/focus.js";
 import { addRuling, clearMemory, loadMemory, renderMemoryReport } from "./collective/memory.js";
 import { PERSONAS, roster } from "./collective/personas.js";
 import { LeaderPlanSchema, leaderSystem, leaderUser } from "./collective/roles.js";
+import { helloCollective } from "./collective/hello.js";
+import { installSessionBlock, removeSessionBlock, renderInstallReport } from "./collective/install.js";
+import { discoverSkills, findSkill, readSkill, renderSkillIndex } from "./skills/index.js";
 import { listDossiers, loadDossier, runMission } from "./collective/run.js";
 import { STATUS_MEANING, renderVerification, verifyCallerClaims } from "./collective/verify.js";
 
 // NOTE: stdio servers must never write to stdout (it carries the protocol). Log with console.error only.
 
-const server = new McpServer({ name: "design-mcp", version: "0.8.0" });
+const server = new McpServer({ name: "design-mcp", version: "0.9.0" });
 setSamplingServer(server);
 
 const ok = (text: string): CallToolResult => ({ content: [{ type: "text", text }] });
@@ -817,7 +820,7 @@ server.registerTool(
 
 /* ---- the collective: one leader, several copies of the model, quotes checked before anyone agrees ---- */
 
-function renderPlan(plan: { restated: string; risks: string[]; assumptions: string[]; unknowns: string[]; units: { id: string; role: string; objective: string; scope: string[]; mustAnswer: string[]; doneWhen: string[] }[] }, known: Set<string>): string {
+function renderPlan(plan: { restated: string; risks: string[]; assumptions: string[]; unknowns: string[]; units: { id: string; role: string; objective: string; scope: string[]; mustAnswer: string[]; doneWhen: string[]; skill?: string }[] }, known: Set<string>): string {
   return [
     "Restated in this repository's terms:",
     plan.restated,
@@ -827,9 +830,12 @@ function renderPlan(plan: { restated: string; risks: string[]; assumptions: stri
       [
         `- ${u.id} [${u.role}] ${u.objective}`,
         `    owns: ${u.scope.length ? u.scope.map((p) => `${p}${known.has(p) ? "" : " (DOES NOT EXIST)"}`).join(", ") : "nothing named"}`,
+        u.skill ? `    follows your skill: ${u.skill}` : "",
         ...u.mustAnswer.map((q) => `    must answer: ${q}`),
         ...u.doneWhen.map((d) => `    done when: ${d}`),
-      ].join("\n")
+      ]
+        .filter(Boolean)
+        .join("\n")
     ),
     ...(plan.assumptions.length ? ["", "Assumed (unverified):", ...plan.assumptions.map((a) => `  - ${a}`)] : []),
     ...(plan.unknowns.length ? ["", "Admitted unknowns:", ...plan.unknowns.map((a) => `  - ${a}`)] : []),
@@ -848,17 +854,21 @@ server.registerTool(
       focus: z.string().optional().describe("The part you care about most"),
       paths: z.array(z.string()).optional().describe("Files you already know are involved"),
       units: z.number().int().min(1).max(12).optional().describe("Cap on units; defaults to collective.maxUnits"),
+      skills: z.array(z.string()).optional().describe("Shortlist of your installed skills to offer the leader, by name; defaults to all of them"),
     },
   },
-  async ({ mission, focus, paths, units }) => {
+  async ({ mission, focus, paths, units, skills }) => {
     try {
       const { config } = loadConfig();
       const { index, cached } = await getIndex(projectDir(), config.codebase, {});
       const digest = renderDigest(index, { tokens: config.codebase.digestTokens, focus: focus ?? mission });
       const maxUnits = Math.min(config.collective.maxUnits, units ?? config.collective.maxUnits);
+      const scan = config.skills.enabled ? await discoverSkills(projectDir(), config.skills) : { skills: [], roots: [], notes: [] };
+      const offered = skills?.length ? scan.skills.filter((s) => skills.some((n) => s.name.toLowerCase() === n.toLowerCase())) : scan.skills;
+      const skillIndex = offered.slice(0, 40).map((s) => `- ${s.name} — ${s.description.replace(/\s+/g, " ").slice(0, 180)}`).join("\n");
       const asked = await askJson({
         role: "leader",
-        system: leaderSystem(maxUnits),
+        system: leaderSystem(maxUnits, skillIndex || undefined),
         user: leaderUser({ mission, digest, focus, paths, maxUnits }),
         schema: LeaderPlanSchema,
         maxTokens: 2200,
@@ -895,9 +905,10 @@ server.registerTool(
       units: z.number().int().min(1).max(12).optional(),
       workers: z.number().int().min(1).max(6).optional().describe("How many units may run at once; defaults to collective.maxWorkers"),
       peer: z.boolean().optional().describe("Round two: let the units read each other's verified findings and answer with evidence. Defaults to collective.peerRound; costs one extra model call per unit"),
+      skills: z.array(z.string()).optional().describe("Shortlist of your installed skills to offer the leader, by name; defaults to all of them"),
     },
   },
-  async ({ mission, focus, paths, units, workers, peer }) => {
+  async ({ mission, focus, paths, units, workers, peer, skills }) => {
     try {
       const { config } = loadConfig();
       for (const role of ["leader", "worker"] as const) {
@@ -905,7 +916,7 @@ server.registerTool(
       }
       const job = startJob("collective", async (log) => {
         const collective = { ...config.collective, ...(peer === undefined ? {} : { peerRound: peer }) };
-        const r = await runMission(projectDir(), { codebase: config.codebase, collective }, { mission, focus, paths, units, workers }, log);
+        const r = await runMission(projectDir(), { codebase: config.codebase, collective, skills: config.skills }, { mission, focus, paths, units, workers, skills }, log);
         log(`dossier written to ${path.relative(projectDir(), r.file)}`);
         return [`Dossier: ${path.relative(projectDir(), r.file)}`, `verified ${r.stats.verified} claim(s), rejected ${r.stats.rejected}, ${r.stats.calls} model call(s), ${r.stats.ms} ms`, "", r.dossier].join("\n");
       });
@@ -967,6 +978,111 @@ server.registerTool(
       }
       const loaded = await loadMemory(projectDir());
       return ok(renderMemoryReport(loaded));
+    } catch (e) {
+      return fail(e);
+    }
+  }
+);
+
+/* ---- saying hello: the session bootstrap, your skills, and making it automatic ---- */
+
+server.registerTool(
+  "collective_hello",
+  {
+    title: "Wake the collective in this repo",
+    description:
+      "The session bootstrap, and the answer to \"Hello collective.\": one cheap pass with no model call and no API key. Returns the roll call of seats, the codebase digest computed from the files, what the collective already established or already got wrong here (with stale entries named), the recent mission dossiers, the owner's installed skills, and the state of the git tree — followed by the exact next steps so the answer is not improvised. Call it once at the start of a session in this project, then answer the owner from it instead of from memory of this repo. Written into the project's instruction file by collective_install so a host that reads those files calls it without being asked.",
+    inputSchema: {
+      focus: z.string().optional().describe("What the owner said they want, so the digest and the advice point at it"),
+      budgetTokens: z.number().int().min(300).max(8000).optional().describe("Digest size; defaults to 1100 tokens, capped by codebase.digestTokens"),
+      skills: z.boolean().optional().describe("Skip the skills scan with false (it walks the configured roots)"),
+    },
+  },
+  async ({ focus, budgetTokens, skills }) => {
+    try {
+      const { config } = loadConfig();
+      const r = await helloCollective(projectDir(), config, { focus, budgetTokens, skills });
+      return ok(r.text);
+    } catch (e) {
+      return fail(e);
+    }
+  }
+);
+
+server.registerTool(
+  "skills_list",
+  {
+    title: "The skills you installed",
+    description:
+      "Finds every SKILL.md under the configured roots (your Freebuff account skills and the usual project and home skill folders by default) and returns each skill's name, its own description and its path, with any sibling files. A skill is instructions, not a tool: this server discovers and reads them and pastes one into a collective unit's prompt when a mission assigns it, and never executes anything a skill suggests — that stays with the host that already has a terminal. Also the resource code://skills.",
+    inputSchema: { query: z.string().optional().describe("Filter by name or description"), roots: z.array(z.string()).optional().describe("Override skills.roots for this call") },
+  },
+  async ({ query, roots }) => {
+    try {
+      const { config } = loadConfig();
+      const scan = await discoverSkills(projectDir(), roots?.length ? { ...config.skills, roots } : config.skills);
+      return ok(renderSkillIndex(scan, { query }));
+    } catch (e) {
+      return fail(e);
+    }
+  }
+);
+
+server.registerTool(
+  "skills_read",
+  {
+    title: "Read one skill in full",
+    description:
+      "Returns the full SKILL.md of one installed skill, so the assistant can follow it: the procedure, the commands, the checklists and the anti-patterns it names. The text is instructions for how to work and never evidence about this repository — nothing in it can be cited as a fact about the code, and this server does not run it. A name that does not match exactly is matched loosely, and the reply always says which file was read.",
+    inputSchema: {
+      name: z.string().describe("The skill's name, e.g. design-taste-frontend, or any part of it"),
+      maxKB: z.number().int().min(2).max(2048).optional().describe("Cut the text here; defaults to skills.maxInPromptKB"),
+    },
+  },
+  async ({ name, maxKB }) => {
+    try {
+      const { config } = loadConfig();
+      const scan = await discoverSkills(projectDir(), config.skills);
+      const found = findSkill(scan.skills, name);
+      if (!found) {
+        return ok(
+          [
+            `No skill matching "${name}".`,
+            scan.skills.length ? `Installed (${scan.skills.length}): ${scan.skills.map((s) => s.name).join(", ")}` : "None found under the configured roots.",
+            `Roots searched: ${scan.roots.join(", ")}`,
+            "Set skills.roots in design-mcp.config.json to point at the folder holding your skills.",
+          ].join("\n")
+        );
+      }
+      const text = await readSkill(found, maxKB ?? config.skills.maxInPromptKB);
+      return ok([`# ${found.name}`, `${found.description}`, `read in full from ${found.path} (${found.bytes} bytes on disk${found.files.length ? `, siblings: ${found.files.join(", ")}` : ""})`, "", "This is the owner's instructions for HOW to work. It is not evidence about this repository: follow it, but cite the code, not the skill.", "", text].join("\n"));
+    } catch (e) {
+      return fail(e);
+    }
+  }
+);
+
+server.registerTool(
+  "collective_install",
+  {
+    title: "Make the collective announce itself each session",
+    description:
+      "Writes one short block between its own markers into this repo's instruction files (AGENTS.md, and CLAUDE.md if the repo has one) telling the host to call collective_hello at the start of a session here and whenever the owner says \"Hello collective.\". A server cannot open a conversation — MCP has no such message — so this is the honest mechanism for \"run every time I open a session\": it relies on the instruction file the host already reads. Idempotent (running it twice writes nothing the second time), never touches text outside its markers, and action=remove takes the block back out. Also available as the prompt hello_collective for hosts that only honour prompts.",
+    inputSchema: {
+      action: z.enum(["install", "remove", "show"]).default("install"),
+      targets: z.array(z.string()).optional().describe("Instruction files, defaults to AGENTS.md plus CLAUDE.md when present"),
+      create: z.boolean().optional().describe("With action=install, create AGENTS.md when none of the targets exist (default true)"),
+    },
+  },
+  async ({ action, targets, create }) => {
+    try {
+      const root = projectDir();
+      if (action === "show") {
+        const results = await installSessionBlock(root, { targets, create: false, dry: true });
+        return ok(renderInstallReport(results, root, true));
+      }
+      const results = action === "remove" ? await removeSessionBlock(root, { targets }) : await installSessionBlock(root, { targets, create });
+      return ok(renderInstallReport(results, root));
     } catch (e) {
       return fail(e);
     }
@@ -1036,7 +1152,52 @@ server.registerResource(
   }
 );
 
+server.registerResource(
+  "installed-skills",
+  "code://skills",
+  { title: "The skills installed for this project", description: "Every SKILL.md found under the configured roots, with its description and path — instructions to follow, never evidence about the code.", mimeType: "text/markdown" },
+  async (uri) => {
+    const { config } = loadConfig();
+    const scan = await discoverSkills(projectDir(), config.skills);
+    return { contents: [{ uri: uri.href, mimeType: "text/markdown", text: renderSkillIndex(scan) }] };
+  }
+);
+
 /* ---- prompts: the workflows that tie the tools together ---- */
+
+server.registerPrompt(
+  "hello_collective",
+  {
+    title: "Hello collective — wake the crew in this repo",
+    description:
+      "Invoke this when the owner says \"Hello collective.\" (or anything like it) in a project that has this server: it wakes the collective, grounds itself on this repo's digest, and answers as a crew standing in the room rather than as an assistant guessing from memory.",
+    argsSchema: { focus: z.string().optional().describe("What the owner seems to want, if they said") },
+  },
+  ({ focus }) => ({
+    description: "Waking the collective in this repository",
+    messages: [
+      {
+        role: "user" as const,
+        content: {
+          type: "text" as const,
+          text: [
+            "Hello collective.",
+            focus ? `The owner's focus: ${focus}` : "",
+            "",
+            "1. Call `collective_hello` now, before anything else. It is one cheap pass, no model call, and it is the only thing that knows this repo.",
+            "2. Answer the owner from it: the repo by name and size, the state of the working tree, what the collective already established or already got wrong here, and the two or three most interesting things in the digest. Name the seats that are standing by, and say plainly that they are stances on one model rather than independent minds.",
+            "3. Say what you did NOT read. The digest is a map; nothing in this conversation is yet a verification of any file.",
+            "4. Then ask which thread to pull — one question, not a menu. If the owner already said what they want, start there instead: `code_context` for the area, then `collective_run` if the work splits into independent questions.",
+            "5. If the owner's skills matter for that thread, list them from `code://skills` and follow the one that fits with `skills_read`.",
+            "Do not describe this repository from memory. Everything you say about the code must come from the digest, a context pack, or a quote the server re-read.",
+          ]
+            .filter(Boolean)
+            .join("\n"),
+        },
+      },
+    ],
+  })
+);
 
 server.registerPrompt(
   "premium_pass",
