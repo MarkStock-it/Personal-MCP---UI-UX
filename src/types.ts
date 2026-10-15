@@ -46,4 +46,4 @@ export interface ImageProvider {
   generate(model: string, apiKey: string, req: ImageRequest): Promise<ImageResult>;
 }
 
-export type Role = "concept" | "builder" | "critic" | "image";
+export type Role = "concept" | "builder" | "critic" | "image" | "leader" | "worker";

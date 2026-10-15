@@ -8,17 +8,30 @@ Node >= 20, TypeScript, ESM. `dist/` is committed because the host runs `dist/in
 ```bash
 npm install
 npm run build          # tsc -> dist/
-npm test               # 57-check keyless stdio suite (smoke/smoke.mjs); no API keys needed
+npm test               # 98-check keyless stdio suite (smoke/smoke.mjs); no API keys needed
 DESIGN_MCP_PROJECT_DIR=<dir> node smoke/call.mjs <tool> '[json]'   # call one tool
 npm run inspect        # MCP inspector
 npx tsx tools/lab/run.ts   # the memory experiment; see tools/lab/README.md (not a gate)
 ```
 `npm test` is the gate: it asserts the tool/resource/prompt inventory, the playbook tools, the
-deterministic checks and every graceful error path. It must be 57/57 before any change is called done.
+deterministic checks, the codebase layer against a fixture repo, one whole collective mission (driven by
+a stub host that answers sampling, including one deliberately invented quote that must be rejected), and
+every graceful error path. It must be 98/98 before any change is called done.
 
 ## Map
-- `src/index.ts` — the MCP surface: 15 generating/testing tools, 6 playbook tools, 11 `design://`
-  resources, 2 prompts. Registered at the bottom; the playbook block is clearly marked.
+- `src/index.ts` — the MCP surface: 15 generating/testing tools, 6 playbook tools, 7 codebase/collective
+  tools, 11 `design://` + 5 `code://` resources, 4 prompts. Registered at the bottom; the codebase and
+  collective blocks are clearly marked.
+- `src/codebase/` — ground truth about the repo, computed from the files, no model involved. `symbols.ts`
+  extracts declarations and imports (**read the header before changing it**: line-oriented comment
+  stripping and span rules exist because two real bugs came from getting them wrong), `scan.ts` lists and
+  reads files (git ls-files so `.gitignore` decides, walk otherwise) and detects conventions, `store.ts`
+  is the cached index + digest/map/graph/conventions renderers, `pack.ts` turns a question into
+token-budgeted source slices with the file's own line numbers.
+- `src/collective/` — the multi-agent layer. `roles.ts` holds the contracts and prompts (the citation
+  contract lives there and is repeated to every worker), `ask.ts` is one schema-checked model call with a
+  single repair round, `verify.ts` re-reads every quote and is the only thing allowed to call a claim
+  true, `run.ts` is the mission loop and the dossier, `focus.ts` is the ground-rules brief.
 - `src/playbook/` — the offline knowledge. `types.ts` is the contract (**read it before adding an entry**),
   `index.ts` is the registry/search/render, `check.ts` is deterministic maths (contrast, soft palettes,
   the anti-slop scanner). Topic modules: motion, scroll, organic, typography, color, layout, floor, rubric, slop.
@@ -49,6 +62,26 @@ scene per site, only with a sequence from that list.
   its place, and what would a session save by reading a digest instead of the notes? It reads the two
   repos, trains a tiny model offline, and prints numbers with intervals. Not covered by the smoke gate.
   Its README records the method, the results and the rule for when to delete the learner.
+
+## The collective (leader, workers, verified quotes)
+`collective_run` never lets the leader read file contents: it reads the digest and plans units. Each unit
+then runs as one model call on its own `code_context` slice, and every finding a worker reports is
+re-verified by `src/collective/verify.ts` — path inside the project, file read from disk, quote present at
+the cited lines (whitespace-insensitive, otherwise exact). Anything that fails is **rejected** and removed
+from what the leader is allowed to build on; `found-elsewhere` keeps a real quote with wrong line numbers
+and says where it actually is. The dossier keeps the rejected list, the conflicts and the unknowns, so a
+future reader can disagree with the conclusion.
+- Roles `leader` and `worker` default to the `session` provider (host sampling): the copies are instances
+  of the host's own model and no key is needed. `providerNeedsKey` guards `collective_run` so a key-based
+  provider fails fast with a clear message instead of mid-mission.
+- Budgets live under `codebase` and `collective` in `src/config.ts`. If you change a cap, change it there,
+  not in the loop.
+- The leader naming a file that does not exist is caught before dispatch; a worker whose reply breaks the
+  contract is dropped whole and listed under "workers that produced nothing usable". Never let a failed
+  worker be silently smoothed over: the dossier's honesty about that is the point.
+- `smoke/smoke.mjs` drives a whole mission with a stub host. If you change the schemas in `roles.ts`, the
+  stub in the smoke suite must change with them — that coupling is deliberate, it is what keeps the
+  contract testable without keys or network.
 
 ## Adding playbook knowledge
 Every entry carries `sources` with a real URL, the exact licence name and a `change` note. Rules:

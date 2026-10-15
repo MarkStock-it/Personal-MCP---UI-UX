@@ -21,8 +21,15 @@ import { usageSummary } from "./usage.js";
 import { findEntry, findTopic, renderEntry, renderTopic, resourceUri, searchPlaybook, TOPIC_IDS, TOPICS, topicIndex } from "./playbook/index.js";
 import { renderPalette, paletteCheck, renderSlopFindings, scanSlop } from "./playbook/check.js";
 import { RUBRIC_SECTIONS } from "./playbook/rubric.js";
+import { packContext, renderPack } from "./codebase/pack.js";
+import { estimateTokens, getIndex, renderConventions, renderDigest, renderGraph, renderMap, summarizeIndex } from "./codebase/store.js";
+import { askJson } from "./collective/ask.js";
+import { renderFocusContract } from "./collective/focus.js";
+import { LeaderPlanSchema, leaderSystem, leaderUser } from "./collective/roles.js";
+import { listDossiers, loadDossier, runMission } from "./collective/run.js";
+import { STATUS_MEANING, renderVerification, verifyCallerClaims } from "./collective/verify.js";
 // NOTE: stdio servers must never write to stdout (it carries the protocol). Log with console.error only.
-const server = new McpServer({ name: "design-mcp", version: "0.7.0" });
+const server = new McpServer({ name: "design-mcp", version: "0.8.0" });
 setSamplingServer(server);
 const ok = (text) => ({ content: [{ type: "text", text }] });
 const fail = (e) => ({
@@ -58,7 +65,7 @@ server.registerTool("providers_config", {
 server.registerTool("providers_test", {
     title: "Test a provider role",
     description: "Makes one tiny real API call for a role to confirm its key and model work. Text roles send a one-word prompt. The image role generates one small test image and saves it under .design-mcp/ in the project.",
-    inputSchema: { role: z.enum(["concept", "builder", "critic", "image"]) },
+    inputSchema: { role: z.enum(["concept", "builder", "critic", "leader", "worker", "image"]) },
 }, async ({ role }) => {
     try {
         if (role === "image") {
@@ -550,6 +557,207 @@ server.registerTool("sequence_extract", {
         return fail(e);
     }
 });
+/* ---- the codebase layer: ground truth about this repo, computed from the files, no model involved ---- */
+server.registerTool("code_index", {
+    title: "Index this codebase",
+    description: "Walks the project and indexes it: every file, every declaration it can see with its line numbers, every import, how the project is built and run, and its own rule files. The index is cached in .design-mcp/codebase/index.json and reused until a file actually changes (path, size or mtime), so calling it again after an edit costs one stat pass rather than a re-read. It respects .gitignore (via git ls-files) and the codebase.roots/ignore config, and it never reads outside the project. No model is called, so this is fast and cannot be wrong in the way prose is wrong. Run it first, then read its digest instead of opening files at random.",
+    inputSchema: { refresh: z.boolean().optional().describe("Rebuild even if nothing changed") },
+}, async ({ refresh }) => {
+    try {
+        const t0 = Date.now();
+        const { config } = loadConfig();
+        const loaded = await getIndex(projectDir(), config.codebase, { refresh: !!refresh });
+        const digest = renderDigest(loaded.index, { tokens: config.codebase.digestTokens });
+        return ok([
+            summarizeIndex(loaded),
+            `.design-mcp/codebase/index.json written (${loaded.stampMs} ms to check the files, ${Date.now() - t0} ms in total)`,
+            "",
+            `Below is the digest: ~${estimateTokens(digest)} tokens (budget ${config.codebase.digestTokens}) that replaces reading the files. Read it, then use code_context for the part you are about to change.`,
+            "",
+            digest,
+        ].join("\n"));
+    }
+    catch (e) {
+        return fail(e);
+    }
+});
+server.registerTool("code_digest", {
+    title: "The compact map of this codebase",
+    description: "The digest: file paths with real line counts, exported symbols with their real line numbers, the commands that build and test the project, its own rule files, its entry points, the files most imported by others, and the third-party surface. Computed from the files themselves rather than written by a model, so it is stable and checkable, and trimmed to a token budget with whatever was cut named at the end. This is what an assistant should read instead of guessing at the shape of a repo. Also available as the resource code://digest.",
+    inputSchema: { focus: z.string().optional().describe("What you are about to work on: files relevant to it are listed first") },
+}, async ({ focus }) => {
+    try {
+        const { config } = loadConfig();
+        const { index } = await getIndex(projectDir(), config.codebase, {});
+        return ok(renderDigest(index, { tokens: config.codebase.digestTokens, focus }));
+    }
+    catch (e) {
+        return fail(e);
+    }
+});
+server.registerTool("code_context", {
+    title: "Pack the source a question needs",
+    description: "Given a question (or paths you already know you need), returns the smallest set of real source lines that can answer it: the files ranked by path, symbol name, doc and import-graph relevance, one hop out to what they depend on and who depends on them, each slice carrying the file's own line numbers, and every file considered and left out with the reason it was left out. Deterministic and model-free, so it costs milliseconds and cannot flatter you. Cite what comes back as path:line. If it returns nothing, the honest answer is 'not in the indexed codebase', not a guess.",
+    inputSchema: {
+        query: z.string().describe("The question or the work, e.g. 'where is the session cookie signed' or 'the newsletter unsubscribe route'"),
+        paths: z.array(z.string()).optional().describe("Files you already know you need; they outrank the ranking and are never dropped silently"),
+        exclude: z.array(z.string()).optional().describe("Files to leave out, e.g. the ones another worker already owns"),
+        budgetTokens: z.number().int().min(500).max(60000).optional().describe("Defaults to codebase.contextTokens"),
+        refresh: z.boolean().optional().describe("Reindex before packing"),
+    },
+}, async ({ query, paths, exclude, budgetTokens, refresh }) => {
+    try {
+        const { config } = loadConfig();
+        const { index, cached } = await getIndex(projectDir(), config.codebase, { refresh: !!refresh });
+        const pack = await packContext(projectDir(), index, {
+            query,
+            paths,
+            exclude,
+            budget: budgetTokens ?? config.codebase.contextTokens,
+        });
+        return ok([`index ${cached ? "reused (files unchanged)" : `rebuilt in ${index.buildMs} ms`}`, renderPack(pack)].join("\n"));
+    }
+    catch (e) {
+        return fail(e);
+    }
+});
+server.registerTool("code_verify_cites", {
+    title: "Check citations against the files",
+    description: "The anti-hallucination gate, and the one tool here that can say 'you are wrong'. Give it claims, each with a path, an optional line range and the exact quote you are relying on. It re-reads each file and answers: verified (the quote is at the cited lines), found-elsewhere (the quote is real but the line numbers are wrong), quote-not-found (the claim is unsupported), file-missing, or outside-project (refused, never read). No model is involved, so it cannot be talked round. Run your own claims through it before you tell the owner something about their code; run a worker's claims through it before you trust them. Whitespace is ignored, everything else must match.",
+    inputSchema: {
+        claims: z
+            .array(z.object({
+            claim: z.string().optional().describe("What you believe, for the report; the quote is what is checked"),
+            path: z.string(),
+            lines: z.tuple([z.number().int().min(1), z.number().int().min(1)]).optional(),
+            quote: z.string().min(4).describe("Text copied from those lines"),
+        }))
+            .min(1)
+            .max(50),
+    },
+}, async ({ claims }) => {
+    try {
+        const v = await verifyCallerClaims(projectDir(), claims);
+        return ok([
+            renderVerification(v, { quotes: false }),
+            "",
+            "What the statuses mean:",
+            ...Object.entries(STATUS_MEANING).map(([k, s]) => `  - ${k}: ${s}`),
+            "",
+            v.counts.verified === v.claims.length
+                ? "Every claim checked out. Quote these lines when you report to the owner."
+                : "Fix or drop anything that is not verified before reporting it as fact.",
+        ].join("\n"));
+    }
+    catch (e) {
+        return fail(e);
+    }
+});
+/* ---- the collective: one leader, several copies of the model, quotes checked before anyone agrees ---- */
+function renderPlan(plan, known) {
+    return [
+        "Restated in this repository's terms:",
+        plan.restated,
+        "",
+        `Units (${plan.units.length}), each one running in parallel with no memory of the others:`,
+        ...plan.units.map((u) => [
+            `- ${u.id} [${u.role}] ${u.objective}`,
+            `    owns: ${u.scope.length ? u.scope.map((p) => `${p}${known.has(p) ? "" : " (DOES NOT EXIST)"}`).join(", ") : "nothing named"}`,
+            ...u.mustAnswer.map((q) => `    must answer: ${q}`),
+            ...u.doneWhen.map((d) => `    done when: ${d}`),
+        ].join("\n")),
+        ...(plan.assumptions.length ? ["", "Assumed (unverified):", ...plan.assumptions.map((a) => `  - ${a}`)] : []),
+        ...(plan.unknowns.length ? ["", "Admitted unknowns:", ...plan.unknowns.map((a) => `  - ${a}`)] : []),
+        ...(plan.risks.length ? ["", "Risks:", ...plan.risks.map((a) => `  - ${a}`)] : []),
+    ].join("\n");
+}
+server.registerTool("collective_plan", {
+    title: "The leader splits a mission into units",
+    description: "One planning call. A leader model reads the codebase digest (the map of the repo, never the file contents) and cuts the mission into independent units: an explorer to report what the code does today, an architect to choose the shape, an implementer to place the edits, a verifier whose only job is to falsify the others, a critic to judge against this project's own standards. Each unit names the files it owns, so no two of them edit the same file, and each carries concrete questions it must answer. Use it when you want the split and will dispatch the workers yourself; use collective_run to have the server dispatch them. Runs on roles.leader, which defaults to your own host model via sampling, so no API key is needed.",
+    inputSchema: {
+        mission: z.string().describe("What needs to be done or understood, in plain language"),
+        focus: z.string().optional().describe("The part you care about most"),
+        paths: z.array(z.string()).optional().describe("Files you already know are involved"),
+        units: z.number().int().min(1).max(12).optional().describe("Cap on units; defaults to collective.maxUnits"),
+    },
+}, async ({ mission, focus, paths, units }) => {
+    try {
+        const { config } = loadConfig();
+        const { index, cached } = await getIndex(projectDir(), config.codebase, {});
+        const digest = renderDigest(index, { tokens: config.codebase.digestTokens, focus: focus ?? mission });
+        const maxUnits = Math.min(config.collective.maxUnits, units ?? config.collective.maxUnits);
+        const asked = await askJson({
+            role: "leader",
+            system: leaderSystem(maxUnits),
+            user: leaderUser({ mission, digest, focus, paths, maxUnits }),
+            schema: LeaderPlanSchema,
+            maxTokens: 2200,
+            attempts: 2,
+        });
+        const known = new Set(index.files.map((f) => f.path));
+        const missing = asked.value.units.flatMap((u) => u.scope.filter((p) => !known.has(p.replace(/^\.\//, ""))));
+        return ok([
+            renderPlan(asked.value, known),
+            "",
+            `Leader: ${config.roles.leader.provider}/${config.roles.leader.model}, ${asked.attempts} attempt(s), ${asked.ms} ms, over a ~${estimateTokens(digest)}-token digest of ${index.totals.files} files${cached ? " (index reused)" : ` (index built in ${index.buildMs} ms)`}.`,
+            missing.length ? `Warning: the leader scoped files that do not exist: ${missing.join(", ")} — trim them before dispatching.` : "Every path the leader scoped exists in the index.",
+            "",
+            "Next: dispatch these units (one worker each, parallel, each with its own code_context pack) and check every claim they make with code_verify_cites — or run the whole thing with collective_run.",
+        ].join("\n"));
+    }
+    catch (e) {
+        return fail(e);
+    }
+});
+server.registerTool("collective_run", {
+    title: "Run the collective on a mission",
+    description: "The full loop, in the background. A leader cuts the mission into units from the digest; the units run in parallel as separate model calls, each on its own token-budgeted pack of real source; the server then re-reads every quote any of them made and deletes the ones that are not in the file; then the leader closes the mission using only what survived, and the dossier names everything left unverified. Returns a job id immediately — poll with design_status. The dossier lands in .design-mcp/collective/<id>.md and is also the job result; read it with collective_report. Workers run on roles.worker (your host model via sampling by default, so no key), one model call per unit.",
+    inputSchema: {
+        mission: z.string().describe("What needs to be done or understood"),
+        focus: z.string().optional(),
+        paths: z.array(z.string()).optional(),
+        units: z.number().int().min(1).max(12).optional(),
+        workers: z.number().int().min(1).max(6).optional().describe("How many units may run at once; defaults to collective.maxWorkers"),
+    },
+}, async ({ mission, focus, paths, units, workers }) => {
+    try {
+        const { config } = loadConfig();
+        for (const role of ["leader", "worker"]) {
+            if (providerNeedsKey(config.roles[role].provider))
+                apiKeyFor(config.roles[role].provider);
+        }
+        const job = startJob("collective", async (log) => {
+            const r = await runMission(projectDir(), { codebase: config.codebase, collective: config.collective }, { mission, focus, paths, units, workers }, log);
+            log(`dossier written to ${path.relative(projectDir(), r.file)}`);
+            return [`Dossier: ${path.relative(projectDir(), r.file)}`, `verified ${r.stats.verified} claim(s), rejected ${r.stats.rejected}, ${r.stats.calls} model call(s), ${r.stats.ms} ms`, "", r.dossier].join("\n");
+        });
+        return ok([
+            `Mission started (job ${job.id}).`,
+            `Leader and workers run on ${config.roles.leader.provider}/${config.roles.leader.model} and ${config.roles.worker.provider}/${config.roles.worker.model}.`,
+            "Check progress with design_status; the result is the full dossier, also saved under .design-mcp/collective/.",
+        ].join("\n"));
+    }
+    catch (e) {
+        return fail(e);
+    }
+});
+server.registerTool("collective_report", {
+    title: "Read a mission dossier",
+    description: "Without an id: lists the mission dossiers kept in .design-mcp/collective/. With an id: returns that dossier — what the collective concluded, the plan, every verified quote with its file and line, what the server rejected as unsupported, conflicts between units, admitted unknowns, and what the run explicitly did not check.",
+    inputSchema: { id: z.string().optional().describe("Mission id, e.g. m-abc123 (a prefix works too)") },
+}, async ({ id }) => {
+    try {
+        if (id)
+            return ok(await loadDossier(projectDir(), id));
+        const list = await listDossiers(projectDir());
+        if (!list.length)
+            return ok("No missions yet. Run collective_run to start one.");
+        return ok([`${list.length} dossier(s) in .design-mcp/collective/:`, ...list.map((d) => `- ${d.id} (${Math.round(d.bytes / 1024)} KB)`)].join("\n"));
+    }
+    catch (e) {
+        return fail(e);
+    }
+});
 /* ---- resources: the same knowledge, addressable for hosts that attach context ---- */
 server.registerResource("design-playbook", resourceUri("index"), { title: "Design playbook index", description: "Every design-playbook topic and entry, with intents.", mimeType: "text/markdown" }, async (uri) => ({ contents: [{ uri: uri.href, mimeType: "text/markdown", text: topicIndex() }] }));
 for (const topic of TOPICS) {
@@ -564,6 +772,17 @@ server.registerResource("critique-rubric", "design://rubric/sections", { title: 
         },
     ],
 }));
+/* ---- the codebase and the contract, as resources a host can attach ---- */
+const codeResource = (id, title, description, render) => server.registerResource(id, `code://${id}`, { title, description, mimeType: "text/markdown" }, async (uri) => {
+    const { config } = loadConfig();
+    const { index } = await getIndex(projectDir(), config.codebase, {});
+    return { contents: [{ uri: uri.href, mimeType: "text/markdown", text: render(index) }] };
+});
+codeResource("digest", "Codebase digest", "The compact, computed map of this repo: files, symbols, line numbers, commands, rule files.", (index) => renderDigest(index, { tokens: loadConfig().config.codebase.digestTokens, focus: undefined }));
+codeResource("map", "File and symbol map", "Every indexed file with its declarations and line spans.", (index) => renderMap(index));
+codeResource("graph", "Import graph", "Who imports what, who would break, and the third-party packages actually imported.", (index) => renderGraph(index));
+codeResource("conventions", "How this project is built", "Package manager, scripts, test files, rule files and everything the index skipped.", (index) => renderConventions(index));
+codeResource("focus", "The focus contract", "How to work in this repository: ground first, cite everything, obey the project's own rules, prove it by running its gates.", (index) => renderFocusContract(index));
 /* ---- prompts: the workflows that tie the tools together ---- */
 server.registerPrompt("premium_pass", {
     title: "Premium design pass",
@@ -628,6 +847,56 @@ server.registerPrompt("motion_review", {
         },
     ],
 }));
+server.registerPrompt("collective_mission", {
+    title: "Run a mission with the collective",
+    description: "The full protocol for handing real work to a team of copies of the model: ground on the digest, split into independent units with one verifier, dispatch the workers in parallel, check every quote with the server before agreeing with it, then implement and prove it with the project's own gates.",
+    argsSchema: {
+        mission: z.string().describe("The work to plan or do, e.g. 'make the newsletter subscribe route reject unconfirmed addresses'"),
+        focus: z.string().optional().describe("The part that matters most"),
+    },
+}, ({ mission, focus }) => ({
+    description: `Collective mission: ${mission}`,
+    messages: [
+        {
+            role: "user",
+            content: {
+                type: "text",
+                text: [
+                    `Mission: ${mission}`,
+                    focus ? `Focus: ${focus}` : "",
+                    "",
+                    "Run it as the collective. In this order, and do not skip step 2 or 5:",
+                    "1. Ground. Read `code_digest` (or the resource code://digest). Do not plan from memory of this repo: the digest is computed from the files and your recollection is not.",
+                    "2. Split, with one leader. `collective_plan` (or `collective_run` to have the server dispatch everything). The units must be independent, must own their own files, and must include a verifier whose only job is to falsify the rest.",
+                    "3. Dispatch the workers in parallel. Each one gets its own `code_context` pack; no worker sees another's context.",
+                    "4. Do not agree with a claim you cannot cite. Every worker claim goes through `code_verify_cites` before it becomes part of your conclusion. Rejected claims are deleted, not softened.",
+                    "5. Implement the smallest correct change, inside the module that already owns the behaviour, obeying this project's own rule files.",
+                    "6. Prove it. Run the project's own gates (the digest lists its test, build and lint commands). Report separately: what you verified by running, what you verified only by reading, and what you did not check at all. An unverified change is unfinished, and saying so is part of the work.",
+                    "",
+                    "=== THE CITATION CONTRACT (this is what makes the collective trustworthy) ===",
+                    "A fact about this code exists for the collective only as a quote with a path and a line range that the server can re-read. Anything else is a question or an unknown. When a worker's quote is not found, that claim is dropped before the leader sees it — so your final answer must never depend on one.",
+                    "",
+                    "=== ROLE CATALOGUE ===",
+                    "explorer: what the code does today. architect: the shape of the change. implementer: exact edits with real anchors. verifier: the case where this breaks. critic: judge against this project's own standards, not your habits.",
+                ]
+                    .filter(Boolean)
+                    .join("\n"),
+            },
+        },
+    ],
+}));
+server.registerPrompt("focus_contract", {
+    title: "How to work in this repository",
+    description: "The ground rules for working in this codebase only, read out of the repo itself: its commands, its rule files, its entry points and what can break. Attach this before any coding session in this project.",
+    argsSchema: { task: z.string().optional().describe("What you are about to work on, so the contract is concrete") },
+}, async ({ task }) => {
+    const { config } = loadConfig();
+    const { index } = await getIndex(projectDir(), config.codebase, {});
+    return {
+        description: `Focus contract for ${index.name}`,
+        messages: [{ role: "user", content: { type: "text", text: renderFocusContract(index, task) } }],
+    };
+});
 const transport = new StdioServerTransport();
 await server.connect(transport);
 console.error("design-mcp running on stdio");

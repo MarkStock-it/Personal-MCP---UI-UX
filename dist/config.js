@@ -15,13 +15,24 @@ const DEFAULT_ALLOWLIST = [
     "split-type", "matter-js", "@types/matter-js", "@use-gesture/react", "simplex-noise",
 ];
 const DEFAULT_TEXT = { provider: "anthropic", model: "claude-sonnet-5-5" };
+// The collective runs on the assistant you are already talking to (MCP sampling), so its workers
+// really are other instances of that same model and no API key is involved. Point these roles at
+// anthropic/openai/google instead to run the collective on a separate model.
+const HOST_TEXT = { provider: "session", model: "host-default" };
 const TestGroup = z.enum(["mobile", "a11y", "perf"]);
+const DEFAULT_IGNORE = [
+    "node_modules", ".git", ".cache", "dist", "build", "out", "coverage", "vendor", "target",
+    ".next", ".nuxt", ".svelte-kit", ".vercel", ".turbo", ".venv", "venv", "__pycache__",
+    ".design-mcp", "variations", "tmp", ".work",
+];
 export const ConfigSchema = z.object({
     roles: z
         .object({
         concept: textRole.default(DEFAULT_TEXT),
         builder: textRole.default(DEFAULT_TEXT),
         critic: textRole.default(DEFAULT_TEXT),
+        leader: textRole.default(HOST_TEXT),
+        worker: textRole.default(HOST_TEXT),
         image: imageRole.default({ provider: "openai", model: "gpt-image-1" }),
     })
         .default({}),
@@ -52,6 +63,34 @@ export const ConfigSchema = z.object({
         ffprobePath: z.string().default("ffprobe"),
         // Only these extra npm packages may be added to a variation (supply-chain safety). Edit to allow more.
         extraDependencyAllowlist: z.array(z.string()).default(DEFAULT_ALLOWLIST),
+    })
+        .default({}),
+    // The codebase layer: what the collective is allowed to read, and how much of it fits in one context.
+    codebase: z
+        .object({
+        // Roots are relative to the project dir. Nothing outside them is ever read or cited.
+        roots: z.array(z.string()).default(["."]),
+        maxFiles: z.number().int().min(1).max(20000).default(4000),
+        maxFileKB: z.number().int().min(1).max(2048).default(512),
+        // Directories never walked, on top of .gitignore (git ls-files already honours that).
+        ignore: z.array(z.string()).default(DEFAULT_IGNORE),
+        // The compact map of the repo that the leader and the host read instead of the files.
+        digestTokens: z.number().int().min(400).max(20000).default(2500),
+        // How much source one packed context answer (one worker, one question) may contain.
+        contextTokens: z.number().int().min(500).max(60000).default(6000),
+    })
+        .default({}),
+    collective: z
+        .object({
+        // Hard cap on workstreams the leader may split a mission into.
+        maxUnits: z.number().int().min(1).max(12).default(6),
+        // How many workers may be in flight at once. Each worker is one model call.
+        maxWorkers: z.number().int().min(1).max(6).default(3),
+        contextTokensPerWorker: z.number().int().min(500).max(60000).default(4500),
+        // One final leader pass that merges only what survived verification.
+        synthesize: z.boolean().default(true),
+        // Keep every mission dossier under .design-mcp/collective/.
+        keepDossiers: z.number().int().min(1).max(200).default(20),
     })
         .default({}),
     test: z

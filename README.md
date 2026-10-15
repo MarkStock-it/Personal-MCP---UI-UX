@@ -1,6 +1,9 @@
-# design-mcp (Phase 6: your own assistant as the model)
+# design-mcp (Phase 6: your own assistant as the model; Phase 7: the codebase layer and the collective)
 
 Switchable text + image provider layer behind an MCP server. Design generation arrives in later phases.
+
+Two halves now: the design pipeline below (brief in, tested variations out) and — further down — the
+**codebase layer and the collective**, for working inside a repository that already exists.
 
 ## Setup
 ```bash
@@ -26,9 +29,67 @@ The `image` role has no keyless option (sampling carries text, not image output)
 Handy for manual sessions: `DESIGN_MCP_PROJECT_DIR=/path/to/site node smoke/call.mjs <tool> '[json]'` calls one tool and prints the result.
 
 ## Test it
-No API keys needed: `npm run build && npm test` runs the stdio smoke suite (57 checks: tool/resource inventory, the playbook tools, config report, brief create/validate/never-overwrite, and every graceful error path).
+No API keys needed: `npm run build && npm test` runs the stdio smoke suite (98 checks: tool/resource/prompt inventory, the playbook tools, config report, brief create/validate/never-overwrite, the codebase layer against a fixture repo, a whole collective mission driven by a stub host that includes one invented quote which must be rejected, and every graceful error path).
 With keys, in Cursor chat: "run providers_config", then "run providers_test for each role", then "usage_report".
 Or: `npm run inspect`.
+
+## Phase 7: the codebase layer and the collective
+
+Everything above designs new sites. This half is for working inside a repository that already exists, and
+it is built on one rule: a claim about the code is only real if the server can re-read it.
+
+### The codebase layer (no model, no keys, milliseconds)
+
+- `code_index` walks the project into `.design-mcp/codebase/index.json`: files, declarations with real
+  line numbers, relative imports (resolved, including TypeScript's `"./x.js"`-for-`x.ts` style), the
+  commands that build and test it, its own rule files, entry points and the files most imported by others.
+  It is cached: a repeat call stat-checks the files and reuses it until something actually changes.
+- `code_digest` prints the compact map of all that (~2-3k tokens for a 46-file repo) — what an assistant
+  should read instead of opening files at random. The same content is addressable as resources:
+  `code://digest`, `code://map`, `code://graph`, `code://conventions` and `code://focus`.
+- `code_context { query }` returns the smallest set of real source lines that can answer a question,
+  ranked by path, symbol name, doc text and one hop of the import graph (what the files depend on, and
+  who would break), each slice carrying the file's own line numbers, plus every file considered and left
+  out with the reason. An empty pack is an answer too: "not in the indexed codebase".
+- `code_verify_cites` is the gate. Give it a path, a line range and the exact quote; it re-reads the file
+  and answers `verified`, `found-elsewhere` (the quote is real, the line numbers are wrong),
+  `quote-not-found`, `file-missing` or `outside-project` (refused, never read). No model is involved, so
+  it cannot be talked round. Run your own claims through it before telling the user something about their
+  code.
+
+### The collective (one leader, several copies of the model, quotes checked before anyone agrees)
+
+`collective_run { mission }` runs the whole loop in the background:
+
+1. The **leader** reads the digest — the map, never the file contents — and cuts the mission into units,
+   each owning its own files, each with concrete questions it must answer, one of them a **verifier**
+   whose only job is to falsify the rest. A file the leader invents is caught here and reported.
+2. The **workers** run in parallel, each as its own model call on its own packed slice of real source,
+   with no memory of each other.
+3. The server re-reads **every quote** they made and deletes the ones that are not in the file where they
+   say they are. Worker reports that fail to obey the contract are dropped whole, not softened.
+4. The **leader closes** the mission using only the checked evidence, and must name what stays unverified.
+
+You get a dossier at `.design-mcp/collective/<id>.md` (job result and `collective_report`): what was
+concluded, the plan, every verified quote with its file and line, everything rejected and why, conflicts
+between units, admitted unknowns, the cost, and what the run explicitly did **not** check. `collective_plan`
+is the same leader pass on its own, when you would rather dispatch the workers yourself. The prompt
+`collective_mission` writes out the protocol; `focus_contract` is the ground-rules brief for working in
+this repository (also the resource `code://focus`).
+
+Cost: one model call for the plan, one per unit, one to close. Workers default to `roles.worker` =
+`session`, so the copies are instances of the model you are already talking to and no API key is needed.
+Set `roles.leader`/`roles.worker` to a provider to run the collective somewhere else. Caps live under
+`collective` (`maxUnits`, `maxWorkers`, `contextTokensPerWorker`, `synthesize`, `keepDossiers`) and the
+codebase layer under `codebase` (`roots`, `ignore`, `maxFiles`, `maxFileKB`, `digestTokens`, `contextTokens`).
+
+Limits, stated because they matter: symbol extraction is lightweight (line scanning, not a type checker),
+so treat a missing symbol as unknown rather than absent; tsconfig path aliases are not resolved, so those
+imports show up as external; and a verified quote proves the code says that, not that the conclusion drawn
+from it is correct. That is what the project's own gates are for — which the dossier tells you to run.
+
+Server state (index, dossiers, jobs, shots, parked prompts) all lives under `.design-mcp/` in the project
+being worked on, so add it to that project's `.gitignore`.
 
 ## Phase 2 workflow
 1. `brief_init`: creates `brief.md` in your project. Fill it in.

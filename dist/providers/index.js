@@ -7,7 +7,6 @@ import { openaiImage, openaiText } from "./openai.js";
 import { session } from "./session.js";
 const TEXT = { anthropic, openai: openaiText, google: googleText, session, manual };
 const IMAGE = { openai: openaiImage, google: googleImage };
-/** Call whichever text provider/model is configured for a role. Config is re-read each call, so edits apply without restart. */
 export async function generateText(role, req) {
     const { provider, model } = loadConfig().config.roles[role];
     const fn = TEXT[provider];

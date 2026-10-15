@@ -11,7 +11,9 @@ const TEXT: Record<string, TextProvider> = { anthropic, openai: openaiText, goog
 const IMAGE: Record<string, ImageProvider> = { openai: openaiImage, google: googleImage };
 
 /** Call whichever text provider/model is configured for a role. Config is re-read each call, so edits apply without restart. */
-export async function generateText(role: "concept" | "builder" | "critic", req: TextRequest): Promise<TextResult> {
+export type TextRole = "concept" | "builder" | "critic" | "leader" | "worker";
+
+export async function generateText(role: TextRole, req: TextRequest): Promise<TextResult> {
   const { provider, model } = loadConfig().config.roles[role];
   const fn = TEXT[provider];
   if (!fn) throw new Error(`Unknown text provider "${provider}".`);
