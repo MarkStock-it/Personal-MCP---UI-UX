@@ -46,6 +46,22 @@ const FIXTURE = {
     "",
     "export const clean = (raw: string) => normalise(raw);",
   ].join("\n"),
+  // A tsconfig with the aliases every modern TS repo has, and one file importing through one. Without
+  // resolution this import looks like a package named "@app/util" and the edge disappears from the graph.
+  "tsconfig.json": [
+    "{",
+    '  "compilerOptions": {',
+    '    "baseUrl": ".",',
+    '    "paths": { "@app/*": ["src/*"], "@notes": ["notes.md"] },',
+    '    "strict": true,',
+    "  },",
+    "}",
+  ].join("\n"),
+  "src/alias-user.ts": [
+    'import { normalise } from "@app/util";',
+    "",
+    "export const viaAlias = (raw: string) => normalise(raw);",
+  ].join("\n"),
   "notes.md": "# Fixture notes\n\nThe fixture exists so the index has something real to read.\n",
   // A skill the owner installed, in the project-local root the defaults look in. The smoke suite proves it
   // is discovered, readable, and that its text really lands in a worker's prompt when a unit is assigned it.
@@ -69,6 +85,10 @@ for (const [rel, text] of Object.entries(FIXTURE)) {
 // A stub host that answers the way Cursor/Freebuff would: it recognises a leader call, a worker call and
 // a synthesis call, and it deliberately includes one invented quote so the server has something to reject.
 const INVENTED_QUOTE = "const cache = new Map<string, string>();";
+// A quote that really is in the file, attached to a claim it has nothing to do with: the thin-support case.
+// Armed only for the second mission, so the first one stays a clean run.
+const THIN_CLAIM = "the retry budget aborts after three attempts and the queue drains on shutdown";
+let thinArmed = false;
 // Every prompt the server sent, so the suite can prove what actually reached the models.
 const seenPrompts = [];
 const peerResponse = (unit) => ({
@@ -94,12 +114,34 @@ const workerReport = (unit) => ({
   answer: `Report for ${unit}: normalise() trims and lowercases its input, and it is exported from src/util.ts.`,
   findings: [
     { claim: "normalise() is exported from src/util.ts", path: "src/util.ts", lines: [1, 1], quote: FIXTURE["src/util.ts"].split("\n")[0], confidence: "high" },
-    { claim: "normalise() memoises its results", path: "src/util.ts", lines: [9, 9], quote: INVENTED_QUOTE, confidence: "low" },
+    { claim: "truncate() slices its input to a fixed limit", path: "src/util.ts", lines: [8, 8], quote: INVENTED_QUOTE, confidence: "low" },
+    ...(thinArmed && unit === "ghost" ? [{ claim: THIN_CLAIM, path: "src/util.ts", lines: [5, 5], quote: FIXTURE["src/util.ts"].split("\n")[4], confidence: "medium" }] : []),
   ],
   steps: [],
   unknowns: ["whether callers depend on the exact casing"],
   openQuestions: [],
   verdict: "ok",
+});
+// The repair pass, answered three different ways, because the three answers are not the same thing:
+// explore-util re-cites its own claim against the line that says it, verify-util withdraws the claim and says
+// the code does not make it, and ghost offers a different finding while never addressing the one it was asked
+// about. Every branch of the pass is therefore exercised, and the suite can tell them apart by name.
+const RECITED_CLAIM = "truncate() slices its input to a fixed limit";
+const repairAnswer = (unit) => ({
+  unit,
+  note: "re-cited what I could and withdrew what the file does not say",
+  findings:
+    unit === "verify-util"
+      ? []
+      : [
+          unit === "explore-util"
+            ? { claim: RECITED_CLAIM, path: "src/util.ts", lines: [8, 8], quote: FIXTURE["src/util.ts"].split("\n")[7], confidence: "high" }
+            : { claim: "the file exports a single limit constant that both functions read", path: "src/util.ts", lines: [5, 5], quote: FIXTURE["src/util.ts"].split("\n")[4], confidence: "medium" },
+        ],
+  dropped:
+    unit === "verify-util"
+      ? [{ claim: RECITED_CLAIM, why: "the file caps the slice at LIMIT but never says the limit is enforced anywhere else" }]
+      : [],
 });
 
 client.setRequestHandler(CreateMessageRequestSchema, async (req) => {
@@ -116,7 +158,8 @@ client.setRequestHandler(CreateMessageRequestSchema, async (req) => {
   const prompt = [req.params?.systemPrompt ?? "", ...(req.params?.messages ?? []).map(textOf)].join("\n");
   seenPrompts.push(prompt);
   const unit = prompt.match(/YOUR UNIT: ([a-z0-9-]+)/);
-  // Round two carries the same "YOUR UNIT:" line, so it has to be recognised first.
+  // Round two and the repair pass both carry the same "YOUR UNIT:" line, so they are recognised first.
+  if (/REPAIR PASS/.test(prompt)) return answer(JSON.stringify(repairAnswer(unit?.[1] ?? "explore-util")));
   if (/now reading what the other copies of yourself found/.test(prompt)) return answer(JSON.stringify(peerResponse(unit?.[1] ?? "explore-util")));
   if (unit) return answer(JSON.stringify(workerReport(unit[1])));
   if (/You are the LEADER/.test(prompt) && /"units"/.test(prompt)) {
@@ -137,10 +180,10 @@ client.setRequestHandler(CreateMessageRequestSchema, async (req) => {
   if (/closing the mission/.test(prompt)) {
     return answer(
       JSON.stringify({
-        answer: "One exported cleaner exists (src/util.ts). The claim that it memoises its results was rejected by the server and is carried as unverified.",
+        answer: "One exported cleaner exists (src/util.ts). The claim about truncate()'s limit was rejected by the server and is carried as unverified.",
         plan: [{ step: "Route new cleaning through the existing export", path: "src/util.ts", intent: "Reuse normalise() instead of adding a second cleaner", risk: "low" }],
         risks: [],
-        unverified: ["whether normalise() memoises its results"],
+        unverified: ["whether truncate() slices to the limit it is written against"],
         firstAction: "Read src/util.ts around the exported function before editing.",
         definitionOfDone: ["npm test passes"],
       })
@@ -356,8 +399,31 @@ try {
   check("a misplaced quote is reported with where it really is", !cites.error && /lives near line 2, not 7-7/.test(cites.text), cites.text.slice(0, 500));
   check("the refusal to read outside the project is explicit", !cites.error && /outside the project: refused, not read/.test(cites.text));
   check("the gate tells you not to report unverified claims as fact", !cites.error && /Fix or drop anything that is not verified/.test(cites.text));
+  // The second way a citation fails: the quote is really there and has nothing to do with the claim.
+  const thinCite = await call("code_verify_cites", { claims: [{ claim: THIN_CLAIM, path: "src/util.ts", lines: [5, 5], quote: utilLines[4] }] });
+  check(
+    "a real quote that shares no wording with its claim is flagged, not rejected",
+    !thinCite.error && /1 verified/.test(thinCite.text) && /VERIFIED BUT THIN/.test(thinCite.text),
+    thinCite.text.slice(0, 500)
+  );
+  check("the flag explains itself and admits it is one-sided", /wording is not entailment/.test(thinCite.text) && /a citation is not support/.test(thinCite.text), thinCite.text.slice(0, 500));
+  check("a quote that does share wording is not flagged as thin", !/VERIFIED BUT THIN/.test(cites.text), cites.text.slice(0, 400));
   const allGood = await call("code_verify_cites", { claims: [{ path: "src/util.ts", lines: [5, 5], quote: "export const LIMIT = 40;" }] });
   check("a fully verified set says so", !allGood.error && /Every claim checked out/.test(allGood.text), allGood.text.slice(0, 160));
+
+  console.log("== path aliases (tsconfig `paths` are internal edges, not packages) ==");
+  const ctxAlias = await call("code_context", { query: "viaAlias normalise" });
+  const graph = await client.readResource({ uri: "code://graph" });
+  const graphText = graph.contents?.[0]?.text ?? "";
+  check(
+    "an import through a tsconfig alias is an internal edge, not a package",
+    /- src\/util\.ts\n\s+imports: \(none\)\n\s+imported by: .*src\/alias-user\.ts/.test(graphText) && /aliases in force:.*@app\/\* → src\/\*/.test(graphText),
+    graphText.slice(0, 700)
+  );
+  check("the aliased file is packed for a question about what it exports", !ctxAlias.error && ctxAlias.text.includes("src/alias-user.ts"), ctxAlias.text.slice(0, 700));
+  const idxAlias = await call("code_index");
+  check("the digest names the aliases it resolved", !idxAlias.error && /Path aliases the project declared/.test(idxAlias.text) && /@app\/\* → src\/\*/.test(idxAlias.text), idxAlias.text.slice(0, 700));
+  check("an aliased import is not counted as a third-party package", !idxAlias.error && !/@app\/util/.test(idxAlias.text), idxAlias.text.slice(0, 900));
 
   console.log("== the collective (leader, parallel workers, checked quotes, dossier) ==");
   const plan = await call("collective_plan", { mission: "Make normalise() the single place user input is cleaned." });
@@ -380,9 +446,9 @@ try {
   check("the dossier shows the leader worked from a digest, not the files", /leader saw a ~\d+-token digest, workers ~\d+ tokens of real source/.test(status), status.slice(0, 400));
   check("the invented claim is rejected by name in the dossier", /## Rejected: cited but not found in the file/.test(status) && /quote-not-found/.test(status));
   check("an invented quote never reaches the reader as evidence", !status.includes(INVENTED_QUOTE), status.slice(0, 200));
-  check("the rejected claim is quarantined below the evidence", status.indexOf("## Rejected") > status.indexOf("## Evidence") && /memoises its results/.test(status.slice(status.indexOf("## Rejected"))));
+  check("the rejected claim is quarantined below the evidence", status.indexOf("## Rejected") > status.indexOf("## Evidence") && /truncate\(\) slices its input/.test(status.slice(status.indexOf("## Rejected"))));
   check("the closing pass ran and its conclusions are separated from the evidence", /## What the collective concluded/.test(status) && /was rejected by the server/.test(status));
-  check("the leader's own unverified list is carried into the dossier", /## Unverified \(claimed, but not checkable from the source we read\)/.test(status) && /memoises/.test(status.slice(status.indexOf("## Unverified"))));
+  check("the leader's own unverified list is carried into the dossier", /## Unverified \(claimed, but not checkable from the source we read\)/.test(status) && /truncate/.test(status.slice(status.indexOf("## Unverified"))));
   check("the leader's invented file is reported as a warning, not used", status.includes("scoped files that do not exist"), status.slice(0, 800));
   check("the run states what it did not check", /## What this does NOT check/.test(status) && /Nothing here ran the project's own gates/.test(status));
   const dossiers = await fs.readdir(path.join(tmp, ".design-mcp", "collective")).catch(() => []);
@@ -404,6 +470,24 @@ try {
   check("the dossier refuses to treat agreement between copies as evidence", /Agreement between copies of one model is not independent evidence/.test(status));
   check("the conversation explains what the models are", /these are copies of one model/i.test(status));
 
+  console.log("== the verdict, and the one repair pass (what the run counts, and what it fixed) ==");
+  check("the job result carries the verdict, so a poller sees it without opening the dossier", /verdict PARTIAL \(5 verified, 3 rejected, 2 repaired, 3\/3 units usable\)/.test(status), status.slice(0, 240));
+  check("the dossier opens with the verdict, counted from the gate's results", /## Verdict \(counted from the gate's results, not written by a model\)/.test(status), status.slice(0, 500));
+  check("the verdict's evidence count is the mission's own tally, not a second story", /- Evidence: 5 quote\(s\) re-read from the files and matched where they were cited/.test(status) && /verified 5 claim\(s\)/.test(status), status.slice(status.indexOf("## Verdict"), status.indexOf("## Verdict") + 900));
+  check("the verdict separates a citation that is still wrong from one that was settled", /- Not evidence: 3 finding\(s\) the gate rejected; 1 still wrong at the end, 1 withdrawn by their own worker/.test(status), status.slice(0, 900));
+  check("the verdict names who was meant to falsify the mission, and that they showed up", /- Falsification: Thorn \(verify-util\) reported, with 1 verified counter-observation\(s\)/.test(status), status.slice(0, 900));
+  check("the verdict refuses to be a judgement, and says the gates were not run", /Grade: PARTIAL — a count of what survived the gate, not a judgement of the answer/.test(status) && /did not execute the project's own gates/.test(status));
+  check("the repair pass is reported, with the server's own reason for the rejection", /## The repair pass \(one second chance, for a citation the gate rejected\)/.test(status) && /3 unit\(s\) got their own rejected findings back/.test(status) && /2 finding\(s\) came back verified, 0 are still not verifiable/.test(status), status.slice(0, 1400));
+  check("re-citing the same claim is told apart from substituting a different finding", /Scout \(explore-util\): 1 sent back → 1 re-cited under the same claim, 0 replaced by a different finding, 0 withdrawn, 0 left unaddressed/.test(status), status.slice(0, 1600));
+  check("a withdrawn claim keeps the worker's reason", /Thorn \(verify-util\): 1 sent back → 0 re-cited under the same claim, 0 replaced by a different finding, 1 withdrawn, 0 left unaddressed/.test(status) && /verify-util withdrew: truncate\(\) slices its input to a fixed limit — the file caps the slice at LIMIT/.test(status), status.slice(0, 2000));
+  check("a finding the worker never addressed is counted, not smoothed over", /\(ghost\): 1 sent back → 0 re-cited under the same claim, 1 replaced by a different finding, 0 withdrawn, 1 left unaddressed/.test(status), status.slice(status.indexOf("## The repair pass"), status.indexOf("## The conversation")));
+  check("a repaired claim is marked in the evidence as re-verified, not merely trusted", /truncate\(\) slices its input to a fixed limit \(repaired and re-verified\)/.test(status), status.slice(status.indexOf("## Evidence"), status.indexOf("## Evidence") + 1200));
+  check("the attempt that failed first is still on the record next to the fix", /\[quote-not-found\] explore-util src\/util\.ts/.test(status) && /a first attempt that failed is still listed as rejected above/.test(status));
+  check("the repair prompt gets the rejected finding and the server's own verdict on it", seenPrompts.some((p) => /THE FINDINGS THE SERVER REJECTED/.test(p) && /you quoted:/.test(p) && /the server says: not found in that file/.test(p)), `prompts captured: ${seenPrompts.length}; repair: ${seenPrompts.filter((p) => /REPAIR PASS/.test(p)).length}; ${JSON.stringify((() => { const p = seenPrompts.find((x) => /REPAIR PASS/.test(x)) ?? ""; const at = p.indexOf("THE FINDINGS"); return at < 0 ? p.slice(-800) : p.slice(at, at + 700); })())}`);
+  check("the repair prompt forbids weakening a claim into something nothing could contradict", seenPrompts.some((p) => /You may not weaken it into something/.test(p)));
+  check("a finding that already passed is never sent back for repair", !seenPrompts.some((p) => /REPAIR PASS/.test(p) && /normalise\(\) is exported from src\/util\.ts/.test(p)));
+  check("the support flag is stated as one-sided, so shared wording is not proof either", /The support label is one-sided/.test(status));
+
   const memList = await call("collective_memory");
   check("memory records what the mission established, with its provenance", !memList.error && /\[established ×\d+\] src\/util\.ts:\d+-\d+: /.test(memList.text), memList.text.slice(0, 300));
   check("memory records what the gate rejected, so nobody repeats it", !memList.error && /\[rejected/.test(memList.text), memList.text.slice(0, 300));
@@ -414,6 +498,7 @@ try {
   check("a ruling that is not a decision is refused", badRuling.error && badRuling.text.includes("needs `text`"));
 
   seenPrompts.length = 0;
+  thinArmed = true; // the second mission carries one quote that is real but does not back its claim
   const run2 = await call("collective_run", { mission: "Check the cleaning path again.", workers: 2 });
   let status2 = "";
   for (let i = 0; i < 80; i++) {
@@ -427,6 +512,10 @@ try {
   check("memory is handed over as hints, not as evidence", seenPrompts.some((p) => p.includes("hints, not instructions")) && seenPrompts.some((p) => /re-read the code before relying on any of them/.test(p)));
   check("the second dossier reports what it was given", /were given to this run as hints/.test(status2), status2.slice(0, 400));
   check("an entry confirmed again is recorded as reinforced, not as new", /nothing new, but \d+ earlier entr/.test(status2), status2.slice(0, 400));
+  check("memory records nothing the evidence does not back, and says what it left out", /1 verified claim\(s\) were kept out of memory: the quote is real but shares no wording/.test(status2), status2.slice(0, 2500));
+  check("a rejection the repair pass re-cited is not filed as a false belief", /1 rejection\(s\) were re-cited correctly by the repair pass/.test(status2), status2.slice(0, 2500));
+  check("a verified quote that does not visibly back its claim is labelled, not trusted", /## Verified, but the quote does not visibly back the claim/.test(status2) && /THIN SUPPORT: the quote shares no wording with the claim/.test(status2), status2.slice(0, 2000));
+  check("the verdict counts weak support instead of grading the run on the totals alone", /Weak support: 1 verified quote\(s\) share no wording/.test(status2) && /Grade: PARTIAL/.test(status2), status2.slice(0, 900));
 
   // Change the code a memory entry quotes: it must retire itself rather than be recited from now on.
   await fs.writeFile(path.join(tmp, "src/util.ts"), FIXTURE["src/util.ts"].split("\n").slice(1).join("\n"));
@@ -469,6 +558,7 @@ try {
   check("it reports the state of the working tree", !hello.error && /git: (not a git repository|.*)/.test(hello.text), hello.text.slice(0, 400));
   check("it says what the collective already knows here", !hello.error && /## What the collective already knows about this repo/.test(hello.text));
   check("it names the open missions on disk", !hello.error && /## Open work/.test(hello.text) && /m-[a-z0-9]+ — /.test(hello.text), hello.text.slice(0, 600));
+  check("it hands back the verdict each mission counted for itself", !hello.error && /· verdict (STRONG|PARTIAL|THIN|NOTHING)/.test(hello.text), hello.text.slice(0, 900));
   check("it lists the owner's skills", !hello.error && /## Your skills/.test(hello.text) && /make-it-fast/.test(hello.text));
   check("it carries a digest computed from the files", !hello.error && /## Digest — this repo in ~\d+ tokens/.test(hello.text) && /src\/util\.ts/.test(hello.text) && /notes\.md/.test(hello.text), hello.text.slice(0, 600));
   check("it costs nothing: no model call, and it says so", !hello.error && /\(\d+ ms, no model call, no API key\.\)/.test(hello.text));
@@ -505,6 +595,40 @@ try {
   check("the repo's own text survives the removal", afterRemove.includes("A hand-written line this repo already had."), afterRemove.slice(0, 200));
   const freshInstall = await call("collective_install", { create: false, targets: ["NOPE.md"] });
   check("it will not invent a file when told not to", !freshInstall.error && /Nothing changed/.test(freshInstall.text), freshInstall.text.slice(0, 240));
+
+  console.log("== collective_install: one file per host, and the gaps named ==");
+  await fs.rm(path.join(tmp, "AGENTS.md"), { force: true });
+  const fresh = await call("collective_install");
+  check("with no instruction file at all it creates exactly one, AGENTS.md", !fresh.error && /AGENTS\.md: created/.test(fresh.text) && !/CLAUDE\.md: created/.test(fresh.text), fresh.text.slice(0, 400));
+  check("it names the hosts it does not reach, with the file each one reads", /Claude Code reads CLAUDE\.md/.test(fresh.text) && /reads GEMINI\.md/.test(fresh.text), fresh.text);
+  check("it does not call Copilot or Windsurf uncovered, since both read AGENTS.md", !/copilot-instructions\.md\. Pass targets/.test(fresh.text) && !/windsurfrules\. Pass targets/.test(fresh.text), fresh.text);
+
+  await fs.writeFile(path.join(tmp, "GEMINI.md"), "# Fixture Gemini context\n\nA line Gemini's own file had.\n");
+  const withGemini = await call("collective_install");
+  const gemini = await fs.readFile(path.join(tmp, "GEMINI.md"), "utf8");
+  check("a repo with GEMINI.md gets the block there too", !withGemini.error && /GEMINI\.md: the block was appended/.test(withGemini.text) && gemini.includes("design-mcp:collective:start") && gemini.includes("A line Gemini's own file had."), withGemini.text.slice(0, 400));
+  check("it says which host reads each file it wrote", /read by Gemini CLI/.test(withGemini.text) && /read by Codex, Cursor, GitHub Copilot, Windsurf, Freebuff/.test(withGemini.text), withGemini.text.slice(0, 500));
+  check("once Gemini is covered it is no longer named as a gap", !/reads GEMINI\.md\. Pass targets/.test(withGemini.text));
+
+  await fs.writeFile(path.join(tmp, "CLAUDE.md"), "# Fixture Claude notes\n\nA line Claude's own file had.\n");
+  const withClaude = await call("collective_install");
+  const claude = await fs.readFile(path.join(tmp, "CLAUDE.md"), "utf8");
+  check("a repo with CLAUDE.md gets the block there as well as in AGENTS.md", !withClaude.error && /CLAUDE\.md: the block was appended/.test(withClaude.text) && /AGENTS\.md: already up to date/.test(withClaude.text) && claude.includes("design-mcp:collective:start"), withClaude.text.slice(0, 400));
+  check("it explains the Claude Code shadowing so nobody deletes one of the two", /Claude Code's default reads the CLAUDE file instead of AGENTS\.md/.test(withClaude.text));
+  check("nothing is written outside the markers", claude.startsWith("# Fixture Claude notes\n\nA line Claude's own file had.\n"), claude.slice(0, 200));
+
+  await fs.rm(path.join(tmp, "CLAUDE.md"), { force: true });
+  await fs.mkdir(path.join(tmp, ".claude"), { recursive: true });
+  await fs.writeFile(path.join(tmp, ".claude", "CLAUDE.md"), "# Nested Claude notes\n\nKept.\n");
+  const nested = await call("collective_install");
+  check(".claude/CLAUDE.md is used when there is no root CLAUDE.md", !nested.error && /\.claude\/CLAUDE\.md: the block was appended/.test(nested.text), nested.text.slice(0, 400));
+  check("and it does not create a second CLAUDE.md beside it", await fs.access(path.join(tmp, "CLAUDE.md")).then(() => false, () => true));
+
+  const removedAll = await call("collective_install", { action: "remove" });
+  check("remove cleans every file it wrote, in every family", !removedAll.error && !(await fs.readFile(path.join(tmp, "GEMINI.md"), "utf8")).includes("design-mcp:collective:start") && !(await fs.readFile(path.join(tmp, ".claude", "CLAUDE.md"), "utf8")).includes("design-mcp:collective:start"), removedAll.text.slice(0, 400));
+  check("each host's own text survives the removal", (await fs.readFile(path.join(tmp, "GEMINI.md"), "utf8")).includes("A line Gemini's own file had.") && (await fs.readFile(path.join(tmp, ".claude", "CLAUDE.md"), "utf8")).includes("Kept."));
+  check("AGENTS.md, which only ever held the block, is gone", await fs.access(path.join(tmp, "AGENTS.md")).then(() => false, () => true));
+  check("it says the rule directories were left alone on purpose", /Rule directories are left alone/.test(removedAll.text));
 
   const focusPrompt = await client.getPrompt({ name: "focus_contract", arguments: { task: "the cleaning change" } });
   const focusText = focusPrompt.messages?.[0]?.content?.text ?? "";

@@ -59,6 +59,16 @@ export const WorkerReportSchema = z.object({
     openQuestions: z.array(z.string()).max(12).default([]),
     verdict: z.enum(["ok", "risky", "blocked"]).default("ok"),
 });
+/**
+ * The repair pass's contract. Narrower than a report on purpose: findings (re-cited) and withdrawals
+ * (with a reason), and nothing else — no answer, no steps, no new questions.
+ */
+export const RepairSchema = z.object({
+    unit: z.string().min(1),
+    note: z.string().max(600).default(""),
+    findings: z.array(FindingSchema).max(20).default([]),
+    dropped: z.array(z.object({ claim: z.string().min(5), why: z.string().min(5) })).max(20).default([]),
+});
 export const SynthesisSchema = z.object({
     answer: z.string().min(20),
     plan: z
@@ -133,6 +143,24 @@ export function leaderUser(i) {
         .filter(Boolean)
         .join("\n");
 }
+/**
+ * The one place a skill's text is pasted into a prompt. It is instructions for how to work, and it is
+ * never evidence about the code — the same sentence appears wherever this block is used.
+ * Kept as a function so the repair pass and the first pass cannot drift apart.
+ */
+export function skillBlock(skill) {
+    if (!skill)
+        return "";
+    return `
+=== A SKILL THE LEADER ASSIGNED TO YOUR UNIT ===
+${skill.name} (from ${skill.path}). Follow it as instructions for HOW you work; it is not evidence about this
+repository. Nothing in it may be cited as a fact about this code — the citation contract below still governs
+every claim you make, so if the skill and the source disagree, the source wins and you say so.
+---
+${skill.text}
+---
+`;
+}
 export function workerSystem(role, skill) {
     return `${personaBlock(PERSONAS[role])}
 
@@ -151,15 +179,7 @@ Rules:
 - "verdict" is "blocked" when the context was not enough to answer at all, "risky" when you answered but
   the answer rests on something you could not see.
 
-${skill ? `
-=== A SKILL THE LEADER ASSIGNED TO YOUR UNIT ===
-${skill.name} (from ${skill.path}). Follow it as instructions for HOW you work; it is not evidence about this
-repository. Nothing in it may be cited as a fact about this code — the citation contract above still governs
-every claim you make, so if the skill and the source disagree, the source wins and you say so.
----
-${skill.text}
----
-` : ""}${CITATION_CONTRACT}
+${skillBlock(skill)}${CITATION_CONTRACT}
 
 Reply with a single JSON object, no prose:
 {"unit":"<the unit id you were given>","answer":"...",
@@ -181,6 +201,69 @@ export function workerUser(unit, pack, memory) {
         "",
         "=== END CONTEXT ===",
         `Report now. "unit" must be exactly "${unit.id}".`,
+    ]
+        .filter(Boolean)
+        .join("\n");
+}
+/**
+ * The repair pass's system prompt: the same seat, the same citation contract, one job.
+ *
+ * The last two rules are the ones that matter. A repair must not be allowed to weaken a claim into
+ * something no evidence could contradict, and it must not be allowed to keep a quote that does not say
+ * what the claim says — the gate checks the text, but only a reader checks the reading.
+ */
+export function repairSystem(role, skill) {
+    return `${personaBlock(PERSONAS[role])}
+
+You are ${PERSONAS[role].handle}, the same worker as before, on a REPAIR PASS. The server re-read the
+files and rejected some of your findings: the quote you gave was not at the lines you cited. Those
+findings are being handed back to you, one by one, with the server's own reason.
+
+This pass exists so that a wrong citation does not cost a true finding. It is also the last one: there is
+no third attempt, so a finding you cannot re-cite correctly is finished either way.
+
+Rules:
+- Fix only the findings listed below. Your findings that already passed are not in scope: do not restate
+  them, do not re-send them, do not reword them.
+- For each one, either re-cite it — path, lines, and the exact text of those lines copied from the context
+  you are given — or withdraw it in "dropped" with the reason ("the file does not say this", "the code
+  does not do this"). Withdrawing is a correct answer and costs nothing. A guess is a defect.
+- A withdrawn or unfixed finding is deleted. It does not become "probably true".
+- You may narrow a claim to what the line you quote actually shows. You may not weaken it into something
+  nothing could contradict ("handles input somehow"), and you may not attach a quote that does not say
+  what the claim says: the server checks the text, and a reading the text does not support is worthless.
+- If the server told you the quote really exists near another line, that is where to look. Re-read that
+  area and cite it at its true lines.
+${skillBlock(skill)}
+${CITATION_CONTRACT}
+
+Reply with a single JSON object, no prose:
+{"unit":"<the unit id you were given>","note":"one line on what you fixed or withdrew",
+ "findings":[{"claim":"...","path":"...","lines":[1,1],"quote":"...","confidence":"high|medium|low"}],
+ "dropped":[{"claim":"the claim you are withdrawing","why":"..."}]}`;
+}
+export function repairUser(unit, pack, rejected, memory) {
+    return [
+        `YOUR UNIT: ${unit.id} (${unit.role}) — ${PERSONAS[unit.role].handle}, repair pass`,
+        `OBJECTIVE: ${unit.objective}`,
+        unit.scope.length ? `FILES YOU OWN: ${unit.scope.join(", ")}` : "FILES YOU OWN: none named",
+        memory ? `\n${memory}` : "",
+        "",
+        "=== THE FINDINGS THE SERVER REJECTED (this is the whole reason for this pass) ===",
+        ...rejected.map((c, i) => [
+            `${i + 1}. [${c.status}] ${c.path}${c.lines ? `:${c.lines[0]}-${c.lines[1]}` : ""} — ${c.claim.replace(/\s+/g, " ")}`,
+            `   you quoted: "${c.quote.replace(/\s+/g, " ").slice(0, 240)}"`,
+            c.detail ? `   the server says: ${c.detail.replace(/\s+/g, " ").slice(0, 300)}` : "",
+        ]
+            .filter(Boolean)
+            .join("\n")),
+        "=== END ===",
+        "",
+        "=== PACKED CONTEXT (the same source, real line numbers; the truth is here) ===",
+        pack,
+        "",
+        "=== END CONTEXT ===",
+        `Repair those ${rejected.length} finding(s) now, and nothing else. "unit" must be exactly "${unit.id}".`,
     ]
         .filter(Boolean)
         .join("\n");

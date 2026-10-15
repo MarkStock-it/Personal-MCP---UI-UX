@@ -6,10 +6,30 @@
  * marked rejected and removed from what the leader is allowed to build on, because a team that can
  * propagate an invented fact is worse than a single model that invents one.
  *
+ * Finding the quote is still only half of it. An audit of four generative search engines found only
+ * 51.5% of generated sentences fully supported by the citations attached to them, and 25.5% of the
+ * citations did not support their sentence at all (Liu, Zhang & Liang, "Evaluating Verifiability in
+ * Generative Search Engines", https://arxiv.org/html/2304.09848v2); in a medical audit about 30% of
+ * cited statements were unsupported (SourceCheckup, https://pmc.ncbi.nlm.nih.gov/articles/PMC12003634/).
+ * So a quote that really is where the worker said it can still fail to back the claim on top of it.
+ *
+ * This file can only check the blatant half of that, and it says so out loud: a quote that shares no
+ * content word with its claim is flagged `thin` and read by the owner instead. The other direction is
+ * NOT a check: shared words are not entailment (HANS showed non-entailing pairs with near-perfect
+ * overlap, https://arxiv.org/html/1902.01007v4), so a high-overlap claim is labelled `overlap` — "the
+ * wording lines up" — and never "supported". Grading a real claim against its quote needs a reading
+ * model; what is here is the part that is honest without one.
+ *
  * This runs with no model, so it cannot be talked out of its answer.
  */
 import fs from "node:fs/promises";
 import path from "node:path";
+/** What the support flag does and does not mean. Printed wherever the flag is. */
+export const SUPPORT_MEANING = {
+    overlap: "the quote shares wording with the claim — nothing more; wording is not entailment",
+    thin: "the quote is in the file but shares no content word with the claim, so it does not visibly back it: read that line yourself",
+    unchecked: "no claim text to compare, so only the quote's location was checked",
+};
 export const STATUS_MEANING = {
     verified: "the quote is in the file at the cited lines",
     "found-elsewhere": "the quote is in the file, but not at the cited lines: the line numbers were wrong",
@@ -28,6 +48,46 @@ export function normalise(text) {
         .trim();
 }
 const head = (s, n = 48) => normalise(s).slice(0, n);
+/** Words that carry no claim-specific meaning. Removing them can only make the check more cautious. */
+const STOPWORDS = new Set([
+    "about", "above", "after", "again", "against", "all", "also", "because", "before", "being", "below", "between", "both",
+    "could", "does", "doing", "done", "down", "during", "each", "every", "from", "further", "have", "having", "here", "however",
+    "instead", "into", "itself", "just", "least", "less", "many", "might", "more", "most", "much", "must", "next", "nothing",
+    "only", "other", "others", "over", "rather", "same", "should", "since", "some", "still", "such", "than", "that", "their",
+    "them", "then", "there", "these", "they", "this", "those", "through", "thus", "under", "until", "very", "were", "what",
+    "when", "where", "which", "while", "will", "with", "within", "without", "would", "your",
+    // Code words that appear in almost any snippet, so they say nothing about support either way.
+    "code", "file", "files", "function", "functions", "line", "lines", "value", "values", "type", "types", "used", "uses", "using",
+]);
+/** Content words of a claim or a quote: identifiers and prose, minus the words that mean nothing here. */
+function contentWords(text) {
+    return normalise(text)
+        .toLowerCase()
+        .split(/[^a-z0-9_$]+/)
+        .flatMap((w) => w.split("_").filter(Boolean))
+        .filter((w) => w.length >= 4 && !STOPWORDS.has(w));
+}
+/** Cheap stemming: a five-character prefix, so "exported"/"export" and "normalise"/"normalises" meet. */
+function shareStem(a, b) {
+    const n = Math.min(5, a.length, b.length);
+    return n >= 4 && a.slice(0, n) === b.slice(0, n);
+}
+/**
+ * Does this quote look like it backs this claim? One-sided on purpose: the only answer that can be given
+ * without a reading model is "these two have nothing to do with each other". A claim with fewer than two
+ * content words, or no claim text at all, is `unchecked` rather than guessed at.
+ */
+export function supportOf(claim, quote) {
+    if (!claim || claim.trim().length < 12)
+        return "unchecked";
+    const claimWords = contentWords(claim);
+    if (claimWords.length < 2)
+        return "unchecked";
+    const quoteWords = contentWords(quote);
+    if (!quoteWords.length)
+        return "unchecked";
+    return claimWords.some((t) => quoteWords.some((w) => shareStem(t, w))) ? "overlap" : "thin";
+}
 export async function verifyReports(input) {
     const t0 = Date.now();
     const root = path.resolve(input.projectRoot);
@@ -86,6 +146,15 @@ export async function verifyReports(input) {
                             claim.foundAt = locate(text, q);
                             claim.detail = `the quote is real but lives near line ${claim.foundAt}, not ${f.lines[0]}-${f.lines[1]}`;
                         }
+                        else {
+                            // The most common rejection by far: line numbers were given and the text is not there. The
+                            // nearest-line note is what makes this repairable, and it used to be unreachable in exactly
+                            // this branch — the hint only appeared when no lines were cited at all.
+                            const near = nearestLine(text, q);
+                            claim.detail = near
+                                ? `not found at ${f.lines[0]}-${f.lines[1]}; the closest line is ${near.line}: "${near.text}"`
+                                : `not found in that file at or near ${f.lines[0]}-${f.lines[1]}, and nothing there resembles it`;
+                        }
                     }
                     else if (normFile.includes(q)) {
                         claim.status = "found-elsewhere";
@@ -100,6 +169,8 @@ export async function verifyReports(input) {
                     }
                 }
             }
+            if (claim.status === "verified")
+                claim.support = supportOf(f.claim, f.quote);
             counts[claim.status]++;
             claims.push(claim);
             if (claim.status !== "verified")
@@ -121,7 +192,51 @@ export async function verifyReports(input) {
             answer: r.answer,
         };
     });
-    return { claims, rejected, units, conflicts: conflictsIn(input.units, input.reports), counts, unparsed, ms: Date.now() - t0 };
+    return { claims, rejected, units, conflicts: conflictsIn(input.units, input.reports), counts, thin: thinOf(claims), supportCounts: supportCountsOf(claims), unparsed, ms: Date.now() - t0 };
+}
+const thinOf = (claims) => claims.filter((c) => c.status === "verified" && c.support === "thin");
+function supportCountsOf(claims) {
+    const out = { overlap: 0, thin: 0, unchecked: 0 };
+    for (const c of claims)
+        if (c.status === "verified" && c.support)
+            out[c.support]++;
+    return out;
+}
+/**
+ * Fold a second pass's claims into the mission's verification (used by the repair round).
+ *
+ * Nothing is replaced or removed: the first attempt stays in `rejected` where it belongs, and a repaired
+ * finding joins `claims` marked `repaired`, so a reader can always see that the same unit said it twice
+ * and only the second citation survived. Counts are recomputed from the merged list, never carried over.
+ */
+export function mergeVerification(base, extra) {
+    // A worker that ignores the instruction not to re-send a finding that already passed must not be able to
+    // inflate the evidence: a finding identical to one the mission already recorded — same unit, file, lines,
+    // claim and quote — is dropped here. Any difference at all (a corrected line number, new wording) is kept,
+    // because "same quote, right lines" is precisely what a repaired citation looks like.
+    const key = (c) => `${c.unit}|${c.path}|${c.lines ? `${c.lines[0]}-${c.lines[1]}` : ""}|${normalise(c.claim)}|${normalise(c.quote)}`;
+    const seen = new Set(base.claims.map(key));
+    const added = extra.claims.filter((c) => !seen.has(key(c))).map((c) => ({ ...c, repaired: true }));
+    const claims = [...base.claims, ...added];
+    const counts = { verified: 0, "found-elsewhere": 0, "quote-not-found": 0, "file-missing": 0, "outside-project": 0 };
+    for (const c of claims)
+        counts[c.status]++;
+    const units = base.units.map((u) => {
+        const mine = claims.filter((c) => c.unit === u.unit);
+        const ok = mine.filter((c) => c.status === "verified").length;
+        return { ...u, verified: ok, rejected: mine.length - ok, total: mine.length };
+    });
+    return {
+        claims,
+        rejected: claims.filter((c) => c.status !== "verified"),
+        units,
+        conflicts: base.conflicts,
+        counts,
+        thin: thinOf(claims),
+        supportCounts: supportCountsOf(claims),
+        unparsed: [...base.unparsed, ...extra.unparsed],
+        ms: base.ms + extra.ms,
+    };
 }
 /** Approximate line where a normalised quote sits, by matching its first words against each line. */
 function locate(text, q) {
@@ -228,6 +343,9 @@ export function renderVerification(v, opts = {}) {
         }
         if (v.rejected.length > (opts.limit ?? 20))
             lines.push(`  ... and ${v.rejected.length - (opts.limit ?? 20)} more`);
+    }
+    if (v.thin.length) {
+        lines.push("", `VERIFIED BUT THIN (the quote is really there and shares no content word with the claim — a citation is not support; check these by hand):`, ...v.thin.slice(0, opts.limit ?? 20).map((c) => `  - ${c.unit} ${c.path}${c.lines ? `:${c.lines[0]}-${c.lines[1]}` : ""}: ${c.claim.replace(/\s+/g, " ").slice(0, 140)}`));
     }
     if (v.conflicts.length)
         lines.push("", "CONFLICTS:", ...v.conflicts.map((c) => `  - ${c}`));

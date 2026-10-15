@@ -31,7 +31,7 @@ import { helloCollective } from "./collective/hello.js";
 import { installSessionBlock, removeSessionBlock, renderInstallReport } from "./collective/install.js";
 import { discoverSkills, findSkill, readSkill, renderSkillIndex } from "./skills/index.js";
 import { listDossiers, loadDossier, runMission } from "./collective/run.js";
-import { STATUS_MEANING, renderVerification, verifyCallerClaims } from "./collective/verify.js";
+import { STATUS_MEANING, SUPPORT_MEANING, renderVerification, verifyCallerClaims } from "./collective/verify.js";
 // NOTE: stdio servers must never write to stdout (it carries the protocol). Log with console.error only.
 const server = new McpServer({ name: "design-mcp", version: "0.9.0" });
 setSamplingServer(server);
@@ -627,7 +627,7 @@ server.registerTool("code_context", {
 });
 server.registerTool("code_verify_cites", {
     title: "Check citations against the files",
-    description: "The anti-hallucination gate, and the one tool here that can say 'you are wrong'. Give it claims, each with a path, an optional line range and the exact quote you are relying on. It re-reads each file and answers: verified (the quote is at the cited lines), found-elsewhere (the quote is real but the line numbers are wrong), quote-not-found (the claim is unsupported), file-missing, or outside-project (refused, never read). No model is involved, so it cannot be talked round. Run your own claims through it before you tell the owner something about their code; run a worker's claims through it before you trust them. Whitespace is ignored, everything else must match.",
+    description: "The anti-hallucination gate, and the one tool here that can say 'you are wrong'. Give it claims, each with a path, an optional line range and the exact quote you are relying on. It re-reads each file and answers: verified (the quote is at the cited lines), found-elsewhere (the quote is real but the line numbers are wrong), quote-not-found (the claim is unsupported), file-missing, or outside-project (refused, never read). It also flags the second failure a citation can have: a quote that is really there but shares no wording with the claim it is attached to, which is labelled as thin support rather than trusted. That label is one-sided and says nothing about the reverse case: wording in common is not entailment, so a verified quote still proves only that the file says that. No model is involved, so it cannot be talked round. Run your own claims through it before you tell the owner something about their code; run a worker's claims through it before you trust them. Whitespace is ignored, everything else must match.",
     inputSchema: {
         claims: z
             .array(z.object({
@@ -647,6 +647,9 @@ server.registerTool("code_verify_cites", {
             "",
             "What the statuses mean:",
             ...Object.entries(STATUS_MEANING).map(([k, s]) => `  - ${k}: ${s}`),
+            "",
+            "What the support label means (only set when the quote was found):",
+            ...Object.entries(SUPPORT_MEANING).map(([k, s]) => `  - ${k}: ${s}`),
             "",
             v.counts.verified === v.claims.length
                 ? "Every claim checked out. Quote these lines when you report to the owner."
@@ -730,9 +733,10 @@ server.registerTool("collective_run", {
         units: z.number().int().min(1).max(12).optional(),
         workers: z.number().int().min(1).max(6).optional().describe("How many units may run at once; defaults to collective.maxWorkers"),
         peer: z.boolean().optional().describe("Round two: let the units read each other's verified findings and answer with evidence. Defaults to collective.peerRound; costs one extra model call per unit"),
+        repair: z.boolean().optional().describe("The repair pass: a finding the citation gate rejected goes back to its unit ONCE with the server's reason and the line the quote really lives at, and the answer is re-gated the same way. Defaults to collective.repairRound; costs at most one extra call per unit that had a repairable rejection"),
         skills: z.array(z.string()).optional().describe("Shortlist of your installed skills to offer the leader, by name; defaults to all of them"),
     },
-}, async ({ mission, focus, paths, units, workers, peer, skills }) => {
+}, async ({ mission, focus, paths, units, workers, peer, repair, skills }) => {
     try {
         const { config } = loadConfig();
         for (const role of ["leader", "worker"]) {
@@ -740,10 +744,20 @@ server.registerTool("collective_run", {
                 apiKeyFor(config.roles[role].provider);
         }
         const job = startJob("collective", async (log) => {
-            const collective = { ...config.collective, ...(peer === undefined ? {} : { peerRound: peer }) };
+            const collective = {
+                ...config.collective,
+                ...(peer === undefined ? {} : { peerRound: peer }),
+                ...(repair === undefined ? {} : { repairRound: repair }),
+            };
             const r = await runMission(projectDir(), { codebase: config.codebase, collective, skills: config.skills }, { mission, focus, paths, units, workers, skills }, log);
             log(`dossier written to ${path.relative(projectDir(), r.file)}`);
-            return [`Dossier: ${path.relative(projectDir(), r.file)}`, `verified ${r.stats.verified} claim(s), rejected ${r.stats.rejected}, ${r.stats.calls} model call(s), ${r.stats.ms} ms`, "", r.dossier].join("\n");
+            return [
+                `Dossier: ${path.relative(projectDir(), r.file)}`,
+                `verified ${r.stats.verified} claim(s), rejected ${r.stats.rejected}, ${r.stats.calls} model call(s), ${r.stats.ms} ms`,
+                r.verdict.headline,
+                "",
+                r.dossier,
+            ].join("\n");
         });
         return ok([
             `Mission started (job ${job.id}).`,
@@ -757,7 +771,7 @@ server.registerTool("collective_run", {
 });
 server.registerTool("collective_report", {
     title: "Read a mission dossier",
-    description: "Without an id: lists the mission dossiers kept in .design-mcp/collective/. With an id: returns that dossier — what the collective concluded, the plan, every verified quote with its file and line, what the server rejected as unsupported, conflicts between units, admitted unknowns, and what the run explicitly did not check.",
+    description: "Without an id: lists the mission dossiers kept in .design-mcp/collective/. With an id: returns that dossier — a verdict counted from the gate's own results, what the collective concluded, the plan, every verified quote with its file and line, the quotes that are real but do not visibly back their claim, what the server rejected as unsupported, the repair pass and what it fixed or withdrew, conflicts between units, admitted unknowns, and what the run explicitly did not check.",
     inputSchema: { id: z.string().optional().describe("Mission id, e.g. m-abc123 (a prefix works too)") },
 }, async ({ id }) => {
     try {
@@ -861,21 +875,26 @@ server.registerTool("skills_read", {
 });
 server.registerTool("collective_install", {
     title: "Make the collective announce itself each session",
-    description: "Writes one short block between its own markers into this repo's instruction files (AGENTS.md, and CLAUDE.md if the repo has one) telling the host to call collective_hello at the start of a session here and whenever the owner says \"Hello collective.\". A server cannot open a conversation — MCP has no such message — so this is the honest mechanism for \"run every time I open a session\": it relies on the instruction file the host already reads. Idempotent (running it twice writes nothing the second time), never touches text outside its markers, and action=remove takes the block back out. Also available as the prompt hello_collective for hosts that only honour prompts.",
+    description: "Writes one short block between its own markers into the instruction files this repo's hosts read on their own — AGENTS.md (Codex, Cursor, GitHub Copilot, Windsurf), CLAUDE.md or .claude/CLAUDE.md (Claude Code, whose default skips AGENTS.md when a CLAUDE file exists), GEMINI.md (Gemini CLI), .github/copilot-instructions.md and .windsurfrules — telling the host to call collective_hello at the start of a session here and whenever the owner says \"Hello collective.\". A server cannot open a conversation — MCP has no such message — so this is the honest mechanism for \"run every time I open a session\": it relies on the instruction file the host already reads. One file per host family, so no host is told twice. Idempotent (running it twice writes nothing the second time), never touches text outside its markers, names the families it did not cover instead of creating files the repo never had, and action=remove takes the block back out. Also available as the prompt hello_collective for hosts that only honour prompts.",
     inputSchema: {
         action: z.enum(["install", "remove", "show"]).default("install"),
-        targets: z.array(z.string()).optional().describe("Instruction files, defaults to AGENTS.md plus CLAUDE.md when present"),
-        create: z.boolean().optional().describe("With action=install, create AGENTS.md when none of the targets exist (default true)"),
+        targets: z
+            .array(z.string())
+            .optional()
+            .describe("Instruction files to use instead of auto-detection, e.g. [\"GEMINI.md\"] or [\"AGENTS.md\",\"CLAUDE.md\"]"),
+        create: z.boolean().optional().describe("With action=install, create AGENTS.md when the repo has no instruction file at all (default true)"),
     },
 }, async ({ action, targets, create }) => {
     try {
         const root = projectDir();
         if (action === "show") {
-            const results = await installSessionBlock(root, { targets, create: false, dry: true });
-            return ok(renderInstallReport(results, root, true));
+            const { results, uncovered } = await installSessionBlock(root, { targets, create: false, dry: true });
+            return ok(renderInstallReport(results, root, true, uncovered));
         }
-        const results = action === "remove" ? await removeSessionBlock(root, { targets }) : await installSessionBlock(root, { targets, create });
-        return ok(renderInstallReport(results, root));
+        if (action === "remove")
+            return ok(renderInstallReport(await removeSessionBlock(root, { targets }), root));
+        const { results, uncovered } = await installSessionBlock(root, { targets, create });
+        return ok(renderInstallReport(results, root, false, uncovered));
     }
     catch (e) {
         return fail(e);
@@ -1029,12 +1048,12 @@ server.registerPrompt("collective_mission", {
                     "1. Ground. Read `code_digest` (or the resource code://digest). Do not plan from memory of this repo: the digest is computed from the files and your recollection is not.",
                     "2. Split, with one leader. `collective_plan` (or `collective_run` to have the server dispatch everything). The units must be independent, must own their own files, and must include a verifier whose only job is to falsify the rest.",
                     "3. Dispatch the workers in parallel. Each one gets its own `code_context` pack; no worker sees another's context.",
-                    "4. Do not agree with a claim you cannot cite. Every worker claim goes through `code_verify_cites` before it becomes part of your conclusion. Rejected claims are deleted, not softened.",
+                    "4. Do not agree with a claim you cannot cite. Every worker claim goes through `code_verify_cites` before it becomes part of your conclusion. Rejected claims are deleted, not softened; a quote that is really there but does not visibly back its claim is labelled, and you read those lines yourself.",
                     "5. Implement the smallest correct change, inside the module that already owns the behaviour, obeying this project's own rule files.",
                     "6. Prove it. Run the project's own gates (the digest lists its test, build and lint commands). Report separately: what you verified by running, what you verified only by reading, and what you did not check at all. An unverified change is unfinished, and saying so is part of the work.",
                     "",
                     "=== THE CITATION CONTRACT (this is what makes the collective trustworthy) ===",
-                    "A fact about this code exists for the collective only as a quote with a path and a line range that the server can re-read. Anything else is a question or an unknown. When a worker's quote is not found, that claim is dropped before the leader sees it — so your final answer must never depend on one.",
+                    "A fact about this code exists for the collective only as a quote with a path and a line range that the server can re-read. Anything else is a question or an unknown. When a worker's quote is not found, that claim is dropped before the leader sees it — so your final answer must never depend on one. `collective_run` then hands that finding back to its own worker exactly once, with the reason and the line the quote really lives at, and re-checks whatever comes back at the same standard; a claim the worker withdraws is recorded as withdrawn rather than quietly dropped. The dossier's verdict line is arithmetic over those checks, and it is the fastest honest answer to \"how much does this run actually know?\".",
                     "",
                     "=== ROLE CATALOGUE ===",
                     "explorer: what the code does today. architect: the shape of the change. implementer: exact edits with real anchors. verifier: the case where this breaks. critic: judge against this project's own standards, not your habits.",

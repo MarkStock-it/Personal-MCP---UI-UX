@@ -36,7 +36,10 @@ async function lastMissions(root, want) {
             continue;
         }
         const lines = text.split("\n");
-        out.push({ id: f.id, mission: lines[1]?.trim() || "(unreadable)", head: lines[3]?.trim() || "" });
+        // The verdict the mission counted for itself. Read, never recomputed: a greeting has no business
+        // grading a run it did not take part in.
+        const grade = text.match(/^- Grade: ([A-Z]+) —/m)?.[1] ?? "";
+        out.push({ id: f.id, mission: lines[1]?.trim() || "(unreadable)", head: lines[3]?.trim() || "", grade });
     }
     return out;
 }
@@ -94,7 +97,7 @@ export async function helloCollective(projectRoot, cfg, opts = {}) {
         "",
         "## Open work",
         ...(missions.length
-            ? missions.map((m) => `- ${m.id} — ${m.mission}\n    .design-mcp/collective/${m.id}.md${m.head ? ` · ${m.head}` : ""}`)
+            ? missions.map((m) => `- ${m.id} — ${m.mission}\n    .design-mcp/collective/${m.id}.md${m.grade ? ` · verdict ${m.grade}` : ""}${m.head ? ` · ${m.head}` : ""}`)
             : ["- No mission has been run here yet. Say what to attack and the first one starts from the files."]),
         "",
         "## Your skills",

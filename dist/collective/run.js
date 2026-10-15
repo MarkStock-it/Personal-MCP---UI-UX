@@ -21,7 +21,9 @@ import { admitFromMission, loadMemory, renderMemoryBlock } from "./memory.js";
 import { renderConversation, runPeerRound } from "./peer.js";
 import { handleFor } from "./personas.js";
 import { discoverSkills, findSkill, readSkill } from "../skills/index.js";
-import { verifyReports } from "./verify.js";
+import { repairableRejections, runRepairRound } from "./repair.js";
+import { missionVerdict } from "./verdict.js";
+import { mergeVerification, verifyReports } from "./verify.js";
 export const missionsDir = (root) => path.join(root, ".design-mcp", "collective");
 export async function runMission(projectRoot, cfg, input, log) {
     const t0 = Date.now();
@@ -137,11 +139,36 @@ export async function runMission(projectRoot, cfg, input, log) {
             warnings.push(`unit ${unit.id} produced nothing usable: ${message.split("\n").slice(0, 3).join(" ").slice(0, 400)}`);
         }
     })));
-    const verification = await verifyReports({ projectRoot, units, reports });
+    let verification = await verifyReports({ projectRoot, units, reports });
+    // Kept: the repair pass adds to `verification`, and the verdict needs to see what the first pass alone
+    // rejected, so it can tell a citation that was fixed from one that is still wrong.
+    const roundOne = verification;
     log(`verification: ${verification.counts.verified} verified, ${verification.rejected.length} rejected of ${verification.claims.length} claims (${verification.ms} ms, no model involved)`);
+    if (verification.thin.length)
+        log(`  ${verification.thin.length} verified quote(s) share no wording with the claim they are attached to — flagged, not deleted`);
     if (verification.conflicts.length)
         for (const c of verification.conflicts)
             log(`  conflict: ${c}`);
+    // One repair pass, and only for the citations a worker can actually fix. The rejected findings go back
+    // with the server's own reason (including where the quote really is, when it is real), the reply is
+    // re-gated at the same standard, and nothing that already verified is re-sent — a correction round that
+    // is allowed to edit good findings can break them.
+    let repair;
+    const fixable = repairableRejections(verification).length;
+    if (cfg.collective.repairRound && fixable) {
+        const unitsWithRejections = new Set(repairableRejections(verification).map((c) => c.unit)).size;
+        log(`repair pass: ${fixable} rejected finding(s) in ${unitsWithRejections} unit(s) go back once, with the reason the gate gave`);
+        repair = await runRepairRound({ projectRoot, index, units, verification, cfg: cfg.collective, memoryBlock, assigned, concurrency: workerCount, log });
+        if (repair.repaired)
+            log(`  repaired: ${repair.repaired} finding(s) re-cited correctly, ${repair.stillRejected} still not verifiable`);
+        else
+            log(`  nothing was repaired: all ${repair.stillRejected || fixable} rejected finding(s) stand as rejected`);
+        if (repair.verification.claims.length)
+            verification = mergeVerification(verification, repair.verification);
+    }
+    else if (cfg.collective.repairRound) {
+        log("repair pass: nothing to repair — every citation that was checked is either verified or outside what a worker can re-cite");
+    }
     // Round two: the copies finally read each other. Only verified findings are exchanged, their replies go
     // through the same gate, and an unevidenced rebuttal is recorded as exactly that rather than as doubt.
     let conversation;
@@ -182,6 +209,10 @@ export async function runMission(projectRoot, cfg, input, log) {
     else {
         synthesis = fallbackSynthesis(plan, verification);
     }
+    // The verdict is arithmetic over the gate's results, not a reading of the closing paragraph — it is
+    // computed here only because `closingRan` is not known until the pass has been attempted.
+    const finalVerdict = missionVerdict({ units, reports, failed, roundOne, repair, merged: verification, closingRan });
+    log(`verdict: ${finalVerdict.headline}`);
     // Memory is admitted on the way out, and quality-gated on purpose: a claim needs a quote the server
     // re-read and a mission that actually closed. Adding everything is a measured way to make the next
     // mission worse, so the rejected claims are kept too — as things not to say again.
@@ -194,6 +225,9 @@ export async function runMission(projectRoot, cfg, input, log) {
             verification,
             closingRan,
             conflictPaths: verification.conflicts.map((c) => c.split(" ")[0]),
+            // A claim the repair pass re-cited correctly was never a false belief about the code, so it is not
+            // filed as one of the things not to say again.
+            settled: (repair?.verification.claims ?? []).filter((c) => c.status === "verified").map((c) => `${c.unit}|${c.claim}`),
             cap: cfg.collective.memoryItems,
             perMission: 6,
         });
@@ -207,14 +241,19 @@ export async function runMission(projectRoot, cfg, input, log) {
     }
     const stats = {
         workers: units.length,
-        calls: reports.length + failed.length + 1 + (closingRan ? 1 : 0) + (conversation?.responses.length ?? 0),
+        calls: reports.length + failed.length + 1 + (closingRan ? 1 : 0) + (conversation?.responses.length ?? 0) + (repair?.calls ?? 0),
         verified: verification.counts.verified,
         rejected: verification.rejected.length,
+        repaired: repair?.repaired ?? 0,
+        withdrawn: (repair?.attempts ?? []).reduce((n, a) => n + a.withdrawn.length, 0),
+        thin: verification.thin.length,
+        repairCalls: repair?.calls ?? 0,
         contextTokens,
         digestTokens,
         cached: loaded.cached,
         closingRan,
         peerCalls: conversation?.responses.length ?? 0,
+        grade: finalVerdict.grade,
         ms: Date.now() - t0,
     };
     const memoryState = { added: admitted, reinforced, stale: memory.stale, live: memory.live.length };
@@ -222,7 +261,7 @@ export async function runMission(projectRoot, cfg, input, log) {
         const a = assigned.get(u.id);
         return a ? [{ name: a.name, unit: u.id, path: a.path, bytes: a.bytes }] : [];
     });
-    const dossier = renderDossier({ id, input, index, plan, units, reports, failed, verification, synthesis, conversation, memory: memoryState, skills: skillsUsed, offered: offered.map((s) => s.name), stats, warnings });
+    const dossier = renderDossier({ id, input, index, plan, units, reports, failed, verification, synthesis, conversation, repair, verdict: finalVerdict, memory: memoryState, skills: skillsUsed, offered: offered.map((s) => s.name), stats, warnings });
     const dir = missionsDir(projectRoot);
     const file = path.join(dir, `${id}.md`);
     try {
@@ -233,7 +272,7 @@ export async function runMission(projectRoot, cfg, input, log) {
     catch {
         warnings.push("the dossier could not be written to .design-mcp/collective/ (read-only project?)");
     }
-    return { id, file, dossier, plan, verification, synthesis, conversation, memory: memoryState, skills: skillsUsed, stats, warnings };
+    return { id, file, dossier, plan, verification, synthesis, conversation, repair, verdict: finalVerdict, memory: memoryState, skills: skillsUsed, stats, warnings };
 }
 /** Unit ids must be unique and stable: the reports are matched back to the plan by id. */
 function dedupeUnits(units) {
@@ -256,7 +295,7 @@ function renderEvidence(units, reports, v) {
             `answer: ${r.answer}`,
             r.steps.length ? `proposed steps: ${r.steps.map((s) => `${s.path} (${s.risk}): ${s.intent}`).join("; ")}` : "",
             "verified findings (quote checked against the file by the server):",
-            ...mine.map((c) => `  - ${c.path}${c.lines ? `:${c.lines[0]}-${c.lines[1]}` : ""} — ${c.claim}\n      quote: ${c.quote.replace(/\s+/g, " ").slice(0, 300)}`),
+            ...mine.map((c) => `  - ${c.path}${c.lines ? `:${c.lines[0]}-${c.lines[1]}` : ""} — ${c.claim}${c.repaired ? " [repaired: this failed the gate once and was re-cited]" : ""}${c.support === "thin" ? " [THIN SUPPORT: the quote is real but shares no wording with this claim, so the line does not visibly back it — do not state it as established; carry it into unverified or check the line]" : ""}\n      quote: ${c.quote.replace(/\s+/g, " ").slice(0, 300)}`),
             r.unknowns.length ? `unknowns: ${r.unknowns.join(" | ")}` : "",
             r.openQuestions.length ? `open questions: ${r.openQuestions.join(" | ")}` : "",
         ]
@@ -291,7 +330,9 @@ export function renderDossier(d) {
         `${d.input.mission}`,
         "",
         `repo: ${idx.name} (${idx.totals.files} files, ${idx.totals.lines} lines) · ${d.units.length} unit(s) · ${stats.calls} model call(s) · ${stats.ms} ms`,
-        `verified ${stats.verified}, rejected ${stats.rejected} · leader saw a ~${stats.digestTokens}-token digest, workers ~${stats.contextTokens} tokens of real source`,
+        `verified ${stats.verified}, rejected ${stats.rejected}${stats.repaired ? `, repaired ${stats.repaired}` : ""} · leader saw a ~${stats.digestTokens}-token digest, workers ~${stats.contextTokens} tokens of real source`,
+        "",
+        ...d.verdict.lines,
         "",
         "## Restated in this repository's own terms",
         plan.restated,
@@ -307,9 +348,29 @@ export function renderDossier(d) {
         ...v.units.map((u) => [
             `### ${handleFor(u.role)} (${u.unit}) — ${u.role}, ${u.verified}/${u.total} claims verified, verdict ${u.verdict}${d.skills.find((s) => s.unit === u.unit) ? `, followed the skill "${d.skills.find((s) => s.unit === u.unit).name}"` : ""}`,
             u.answer,
-            ...v.claims.filter((c) => c.unit === u.unit && c.status === "verified").map((c) => `- ${c.path}${c.lines ? `:${c.lines[0]}-${c.lines[1]}` : c.foundAt ? `:~${c.foundAt}` : ""}: ${c.claim}\n    \`${c.quote.replace(/\s+/g, " ").slice(0, 240)}\``),
+            ...v.claims
+                .filter((c) => c.unit === u.unit && c.status === "verified")
+                .map((c) => `- ${c.path}${c.lines ? `:${c.lines[0]}-${c.lines[1]}` : c.foundAt ? `:~${c.foundAt}` : ""}: ${c.claim}${c.repaired ? " (repaired and re-verified)" : ""}${c.support === "thin" ? " — THIN SUPPORT: the quote shares no wording with the claim" : ""}\n    \`${c.quote.replace(/\s+/g, " ").slice(0, 240)}\``),
         ].join("\n")),
         ...(v.rejected.length ? ["", "## Rejected: cited but not found in the file (never build on these)", ...v.rejected.map((c) => `- [${c.status}] ${c.unit} ${c.path}: ${c.claim.replace(/\s+/g, " ").slice(0, 200)}${c.detail ? `\n    ${c.detail}` : ""}`)] : []),
+        ...(v.thin.length
+            ? [
+                "",
+                "## Verified, but the quote does not visibly back the claim",
+                "The quote is really at those lines. It also shares no content word with the claim it is attached to, which is what an unsupported citation looks like from the outside — so it is labelled rather than trusted. Whether a line truly supports a claim needs a reader; this is the half that can be checked without one, and shared wording would not have proved it either.",
+                ...v.thin.map((c) => `- ${c.unit} ${c.path}${c.lines ? `:${c.lines[0]}-${c.lines[1]}` : ""}: ${c.claim.replace(/\s+/g, " ").slice(0, 200)}\n    \`${c.quote.replace(/\s+/g, " ").slice(0, 200)}\``),
+            ]
+            : []),
+        ...(d.repair?.attempts.length
+            ? [
+                "",
+                "## The repair pass (one second chance, for a citation the gate rejected)",
+                `- ${d.repair.calls} unit(s) got their own rejected findings back with the server's reason: which lines they cited, and where the quote actually is when it exists elsewhere. ${d.repair.repaired} finding(s) came back verified, ${d.repair.stillRejected} are still not verifiable.`,
+                ...d.repair.attempts.map((a) => `- ${handleFor(a.role)} (${a.unit}): ${a.sent} sent back → ${a.recited} re-cited under the same claim, ${a.replaced} replaced by a different finding, ${a.withdrawn.length} withdrawn, ${a.unaddressed} left unaddressed${a.error ? ` — the pass FAILED: ${a.error.split("\n")[0]}` : ""}`),
+                ...d.repair.attempts.flatMap((a) => a.withdrawn.map((w) => `    - ${a.unit} withdrew: ${w.claim.replace(/\s+/g, " ").slice(0, 160)} — ${w.why.replace(/\s+/g, " ").slice(0, 200)}`)),
+                "- Nothing that had already passed was re-sent: a correction round is allowed to add, never to edit a verified finding. Every re-cited claim went through the same gate at the same standard, and a first attempt that failed is still listed as rejected above.",
+            ]
+            : []),
         ...(v.conflicts.length ? ["", "## Conflicts", ...v.conflicts.map((c) => `- ${c}`)] : []),
         ...(d.conversation ? ["", "## The conversation (round two)", ...renderConversation(d.conversation, d.units)] : []),
         ...(d.conversation?.responses.some((r) => r.dissent.length)
@@ -360,7 +421,11 @@ export function renderDossier(d) {
             ? `- memory: ${d.memory.live} live entr${d.memory.live === 1 ? "y" : "ies"} were in front of it at the start (hints, never citations); ${d.memory.added.length} recorded from this mission${d.memory.stale.length ? `; ${d.memory.stale.length} retired as stale` : ""}.`
             : "- memory: nothing recorded yet from this repository.",
         d.skills.length ? `- skills: ${d.skills.map((s) => `${s.name} → ${s.unit}`).join(", ")} (read from disk into that worker's prompt; not evidence).` : "- skills: none assigned by the leader.",
-        `- verification: ${v.claims.length} quotes re-read from disk in ${v.ms} ms, ${v.counts.verified} matched at the cited lines, ${v.counts["found-elsewhere"]} matched elsewhere (line numbers wrong), ${v.counts["quote-not-found"]} not found.`,
+        `- verification: ${v.claims.length} quotes re-read from disk in ${v.ms} ms, ${v.counts.verified} matched at the cited lines, ${v.counts["found-elsewhere"]} matched elsewhere (line numbers wrong), ${v.counts["quote-not-found"]} not found${stats.thin ? `; ${stats.thin} matched but do not visibly back their claim` : ""}.`,
+        stats.repairCalls
+            ? `- repair: one pass, ${stats.repairCalls} model call(s). ${stats.repaired} rejected finding(s) were re-cited and re-verified; ${stats.withdrawn} claim(s) were withdrawn by their own worker with a reason. The pass never re-sends a finding that already passed, and never gets a second attempt.`
+            : `- repair: no pass ran (nothing rejected was repairable, or \`collective.repairRound\` is off).`,
+        `- verdict: ${d.verdict.grade.toUpperCase()} — ${d.verdict.totals.verified} verified quote(s), ${d.verdict.totals.rejected} rejected, ${d.verdict.totals.stillWrong} citation(s) still wrong, ${d.verdict.totals.productive}/${d.verdict.totals.units} unit(s) usable. Computed from these counts, not written by a model.`,
         `- index: ${idx.totals.files} files, ${stats.cached ? "reused from cache" : `built in ${idx.buildMs} ms`}; ${idx.skipped.length} file(s) skipped.`,
         ...(d.warnings.length ? ["", "## Warnings raised while running", ...[...new Set(d.warnings)].map((w) => `- ${w}`)] : []),
         "",
@@ -368,6 +433,7 @@ export function renderDossier(d) {
         `- A verified quote proves the code says that. It does not prove the conclusion drawn from it is right.`,
         `- Nothing here ran the project's own gates. After implementing, run: ${[t.test ? `\`${t.test}\`` : null, t.build ? `\`${t.build}\`` : null, t.lint ? `\`${t.lint}\`` : null].filter(Boolean).join(", ") || "(this project declares no test, build or lint command — that is itself a finding)"}`,
         `- The index skipped ${idx.skipped.length} file(s) and extracts symbols with a lightweight parser, so a path can be missing from every context above without being missing from the repo.`,
+        `- The support label is one-sided. A quote sharing no wording with its claim is flagged; a quote that shares wording is NOT thereby supporting it (non-entailing pairs with near-perfect overlap are easy to build), and nothing here reads a passage to decide.`,
     ]
         .filter((l) => l !== undefined)
         .join("\n");

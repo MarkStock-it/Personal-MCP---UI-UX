@@ -112,6 +112,11 @@ export const ConfigSchema = z.object({
         // others (and agreement between copies of one model is not independent evidence), so this is a
         // switch rather than a law: turn it off to halve the calls.
         peerRound: z.boolean().default(true),
+        // The repair pass: a finding the citation gate rejected goes back to its unit ONCE, with the
+        // server's own reason and the line the quote really lives at, and the answer is re-gated like
+        // anything else. One pass, never a loop: a single targeted repair after a deterministic rejection
+        // measurably beats resampling, repeated repairs do not, and debugging effectiveness decays fast.
+        repairRound: z.boolean().default(true),
         // What the collective remembers between missions. Only quote-verified claims and rejections get in.
         memory: z.boolean().default(true),
         memoryItems: z.number().int().min(10).max(400).default(60),

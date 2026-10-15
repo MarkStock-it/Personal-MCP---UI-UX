@@ -80,7 +80,9 @@ export function rankFiles(index, terms) {
  * Which real file a relative import points at. TypeScript's NodeNext style imports `"./util.js"` while the
  * file on disk is `util.ts`, so a `.js`-spelled specifier has to be tried as TypeScript source as well —
  * without this, half the edges in a modern TS repo are invisible and the graph lies about who uses what.
- * Path aliases (tsconfig `paths`) are not resolved; those imports are reported as unresolved instead.
+ * Bare specifiers go through the project's own `paths` map first (see aliasTargets): a tsconfig alias is a
+ * real internal edge, and treating `@/lib/x` as a package is how a repo with aliases everywhere gets a graph
+ * that says nothing about who uses what.
  */
 const IMPORT_CANDIDATES = (spec) => {
     const bases = [spec];
@@ -91,7 +93,29 @@ const IMPORT_CANDIDATES = (spec) => {
     }
     return [...bases, ...bases.flatMap((b) => [`${b}.ts`, `${b}.tsx`, `${b}.js`, `${b}.jsx`, `${b}.mjs`, `${b}.cjs`, `${b}.json`, `${b}.css`, `${b}/index.ts`, `${b}/index.tsx`, `${b}/index.js`, `${b}/index.jsx`])];
 };
-function buildGraph(files) {
+/**
+ * Where a bare specifier can live, according to the project's own `paths` map. First matching pattern wins,
+ * because that is the order TypeScript resolves in, and the alias list is already sorted most-specific-first.
+ */
+export function aliasTargets(spec, aliases) {
+    for (const a of aliases) {
+        const star = a.pattern.indexOf("*");
+        const join = (t) => path.posix.normalize(path.posix.join(a.base, t)).replace(/^\.\//, "");
+        if (star < 0) {
+            if (spec === a.pattern)
+                return a.targets.map(join);
+            continue;
+        }
+        const prefix = a.pattern.slice(0, star);
+        const suffix = a.pattern.slice(star + 1);
+        if (!spec.startsWith(prefix) || !spec.endsWith(suffix) || spec.length < prefix.length + suffix.length)
+            continue;
+        const middle = spec.slice(prefix.length, spec.length - suffix.length);
+        return a.targets.map((t) => join(t.replace("*", middle)));
+    }
+    return [];
+}
+function buildGraph(files, aliases = []) {
     const known = new Set(files.map((f) => f.path));
     const graph = {};
     const ext = new Map();
@@ -101,7 +125,14 @@ function buildGraph(files) {
             if (!imp.spec.startsWith(".") && !imp.spec.startsWith("/")) {
                 // `node:` builtins are the runtime, not a dependency: counting them as "third-party surface"
                 // would tell the reader this project depends on the platform.
-                if (!imp.spec.startsWith("node:"))
+                if (imp.spec.startsWith("node:"))
+                    continue;
+                const viaAlias = aliasTargets(imp.spec, aliases)
+                    .flatMap(IMPORT_CANDIDATES)
+                    .find((c) => known.has(c));
+                if (viaAlias)
+                    imports.push(viaAlias);
+                else
                     ext.set(imp.spec, (ext.get(imp.spec) ?? 0) + 1);
                 continue;
             }
@@ -141,7 +172,7 @@ function findEntryPoints(files, conventions) {
 }
 export async function buildIndex(projectRoot, cfg, stamp) {
     const scan = await scanRepo(projectRoot, cfg);
-    const { graph, externals } = buildGraph(scan.files);
+    const { graph, externals } = buildGraph(scan.files, scan.aliases);
     const byLangMap = new Map();
     for (const f of scan.files) {
         const g = byLangMap.get(f.lang) ?? { lang: f.lang, files: 0, lines: 0 };
@@ -155,7 +186,7 @@ export async function buildIndex(projectRoot, cfg, stamp) {
         .sort((a, b) => b.importedBy - a.importedBy || a.path.localeCompare(b.path))
         .slice(0, 12);
     return {
-        version: 1,
+        version: 2,
         root: projectRoot,
         name: scan.conventions.name,
         generatedAt: new Date().toISOString(),
@@ -173,6 +204,7 @@ export async function buildIndex(projectRoot, cfg, stamp) {
         },
         graph,
         externals,
+        aliases: scan.aliases.map((a) => ({ pattern: a.pattern, targets: a.targets })),
         entryPoints: findEntryPoints(scan.files, scan.conventions),
         hotspots,
     };
@@ -195,7 +227,7 @@ export async function getIndex(projectRoot, cfg, opts = {}) {
     if (!opts.refresh) {
         try {
             const cached = JSON.parse(await fs.readFile(indexFile(projectRoot), "utf8"));
-            if (cached.version === 1 && cached.stamp === stamp)
+            if (cached.version === 2 && cached.stamp === stamp)
                 return { index: cached, cached: true, stampMs: ms };
         }
         catch {
@@ -258,6 +290,7 @@ export function renderDigest(index, opts) {
         ...(index.conventions.tests.length
             ? ["", "## Tests", `- ${index.conventions.tests.slice(0, 8).join("\n- ")}${index.conventions.tests.length > 8 ? `\n- ... and ${index.conventions.tests.length - 8} more` : ""}`]
             : []),
+        ...(index.aliases?.length ? ["", "## Path aliases the project declared", `- ${index.aliases.map((a) => `${a.pattern} → ${a.targets.join(", ")}`).join(", ")} (resolved, so these edges are internal)`] : []),
         ...(index.externals.length ? ["", "## Third-party surface", `- ${index.externals.slice(0, 10).map((e) => `${e.spec} ×${e.count}`).join(", ")}`] : []),
         "",
         "## Map (line numbers are real; use them for citations)",
@@ -312,7 +345,8 @@ export function renderMap(index, focus) {
 export function renderGraph(index) {
     const rows = Object.entries(index.graph).filter(([, g]) => g.imports.length || g.importedBy.length);
     return [
-        `# ${index.name} — import graph (relative imports only; bare package imports are listed separately)`,
+        `# ${index.name} — import graph (relative imports, plus bare specifiers the project's own tsconfig \`paths\` map resolved; everything else is listed as third-party)`,
+        ...(index.aliases?.length ? [`aliases in force: ${index.aliases.map((a) => `${a.pattern} → ${a.targets.join(", ")}`).join(", ")}`] : []),
         "",
         ...rows.map(([p, g]) => `- ${p}\n    imports: ${g.imports.join(", ") || "(none)"}\n    imported by: ${g.importedBy.join(", ") || "(nobody)"}`),
         "",

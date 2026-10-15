@@ -8,19 +8,22 @@ Node >= 20, TypeScript, ESM. `dist/` is committed because the host runs `dist/in
 ```bash
 npm install
 npm run build          # tsc -> dist/
-npm test               # 159-check keyless stdio suite (smoke/smoke.mjs); no API keys needed
+npm test               # 202-check keyless stdio suite (smoke/smoke.mjs); no API keys needed
 DESIGN_MCP_PROJECT_DIR=<dir> node smoke/call.mjs <tool> '[json]'   # call one tool
 npm run inspect        # MCP inspector
 npx tsx tools/lab/run.ts   # the memory experiment; see tools/lab/README.md (not a gate)
 ```
 `npm test` is the gate: it asserts the tool/resource/prompt inventory, the playbook tools, the
-deterministic checks, the codebase layer against a fixture repo, two whole collective missions (driven by a
-stub host that answers sampling, including one deliberately invented quote that must be rejected, an
+deterministic checks, the codebase layer against a fixture repo (including a tsconfig alias that must come
+back as an internal edge and not as a package), two whole collective missions (driven by a stub host that
+answers sampling, including one deliberately invented quote that must be rejected and then handed back in
+the repair pass — one unit re-cites it, one withdraws it with a reason, one never addresses it, and the
+three outcomes must stay distinguishable — a quote that is real but shares no wording with its claim, an
 unevidenced rebuttal that must be labelled unproven, and a memory entry whose code changes and must retire
-itself), the session greeting and the skills layer (a fixture SKILL.md that must be found, read, and pasted
-into exactly the worker that was assigned it), the session-block installer (idempotent, and it must not
-touch text outside its markers), and every graceful error path. It must be 159/159 before any change is
-called done.
+itself), the computed verdict the mission counts for itself, the session greeting and the skills layer (a
+fixture SKILL.md that must be found, read, and pasted into exactly the worker that was assigned it), the
+session-block installer (idempotent, and it must not touch text outside its markers), and every graceful
+error path. It must be 202/202 before any change is called done.
 
 ## Map
 - `src/index.ts` — the MCP surface: 15 generating/testing tools, 6 playbook tools, 8 codebase/collective
@@ -39,6 +42,9 @@ token-budgeted source slices with the file's own line numbers.
   contract lives there and is repeated to every worker), `ask.ts` is one schema-checked model call with a
   single repair round, `verify.ts` re-reads every quote and is the only thing allowed to call a claim
   true, `run.ts` is the mission loop and the dossier, `focus.ts` is the ground-rules brief.
+  `repair.ts` is the one bounded second chance a rejected citation gets (read its header before widening
+  it: one pass, repair-only-adds, the same gate decides), and `verdict.ts` is the arithmetic the mission
+  counts for itself — it grades a run from the gate's results and never from the closing paragraph.
   `personas.ts` gives each seat a stance and a voice (Scout/Mason/Wrench/Thorn/Judge, Keystone leads —
   prompt interventions that change what gets said, not independent minds), `peer.ts` is round two where the
   copies read each other's **verified** findings and must answer with evidence, and `memory.ts` is what
@@ -93,6 +99,22 @@ future reader can disagree with the conclusion.
   provider fails fast with a clear message instead of mid-mission.
 - Budgets live under `codebase` and `collective` in `src/config.ts`. If you change a cap, change it there,
   not in the loop.
+- **A rejected quote is not a dead end and not a softer claim.** `repair.ts` hands a repairable rejection
+  back to its own unit exactly once, with the reason and the line the quote really lives at, and the reply
+  goes through `verifyReports` at the same standard. The rules that must not be relaxed: one pass (repairs
+  stop paying and start breaking things), never a finding that already verified (a correction round that can
+  edit good findings breaks them), only the statuses a worker can act on (`quote-not-found`,
+  `found-elsewhere`), the first attempt stays in `rejected` for the record, and a claim the worker
+  withdraws is recorded as withdrawn rather than deleted. A repair ADDS evidence; it never upgrades a
+  rejection.
+- **A found quote is only half of a citation.** `verify.ts` labels a verified quote that shares no content
+  word with its claim as thin support, and that label is one-sided on purpose: it can only ever downgrade.
+  Never report it as entailment, never let a thin claim into memory (see `memory.ts`), and keep the
+  "wording in common is not proof either" sentence wherever the flag is explained. A real support check
+  needs a reading model; what is here is the part that is honest without one.
+- The verdict's grade is a function of counts only (`missionVerdict`), and the downgrade rules are stated
+  in `verdict.ts`. If you add a way to make a mission look better without adding verified quotes, you have
+  changed the wrong thing.
 - The leader naming a file that does not exist is caught before dispatch; a worker whose reply breaks the
   contract is dropped whole and listed under "workers that produced nothing usable". Never let a failed
   worker be silently smoothed over: the dossier's honesty about that is the point.
@@ -124,11 +146,18 @@ future reader can disagree with the conclusion.
   the answer to a greeting, so it must stay fast and it must not invent work: if the owner only said hello,
   it hands the assistant the facts to say back and one question to ask.
 - An MCP server cannot open a conversation, so "runs every time I open a session" is carried by
-  `collective_install`, which writes a marked block into the repo's own instruction file (AGENTS.md, plus
-  CLAUDE.md when present). Keep it that way, and keep the block short: the alternative — a tool that
-  magically fires on session start — does not exist, and claiming otherwise would be the one thing this
-  codebase does not do. `remove` takes it back out; the smoke suite asserts the text outside the markers is
-  never touched and that a second install writes nothing.
+  `collective_install`, which writes a marked block into the instruction files the hosts actually read.
+  Which files those are is documented rather than guessed, and the table lives in
+  `src/collective/install.ts` with its sources: AGENTS.md (Codex, Cursor, Copilot, Windsurf, Freebuff),
+  CLAUDE.md / .claude/CLAUDE.md (Claude Code — its default *skips* AGENTS.md when a CLAUDE file exists, so
+  a repo with both needs the block in both), GEMINI.md (Gemini CLI, which does not read AGENTS.md unless
+  `context.fileName` is configured), .github/copilot-instructions.md, and the legacy .windsurfrules.
+  One file per host family, `create` only ever produces AGENTS.md, and hosts whose file is absent are named
+  in the report as gaps instead of created silently. Keep it that way, and keep the block short: the
+  alternative — a tool that magically fires on session start — does not exist, and claiming otherwise would
+  be the one thing this codebase does not do. `remove` takes it back out; the smoke suite asserts the text
+  outside the markers is never touched, that each host's own file is written once, and that a second
+  install writes nothing.
 - Skills are instructions to follow and are **never evidence about the code**: `workerSystem` says so in as
   many words, and the dossier repeats it. A unit is assigned one with `skill` on the plan (or `skills` on
   `collective_run` to shortlist what the leader may offer); the text is read at dispatch time and only for

@@ -29,7 +29,7 @@ The `image` role has no keyless option (sampling carries text, not image output)
 Handy for manual sessions: `DESIGN_MCP_PROJECT_DIR=/path/to/site node smoke/call.mjs <tool> '[json]'` calls one tool and prints the result.
 
 ## Test it
-No API keys needed: `npm run build && npm test` runs the stdio smoke suite (159 checks: tool/resource/prompt inventory, the playbook tools, config report, brief create/validate/never-overwrite, the codebase layer against a fixture repo, the collective's round-two conversation and its memory — including one invented quote that must be rejected, an unevidenced rebuttal that must be marked unproven, and a memory entry whose code changed and must retire itself — and every graceful error path).
+No API keys needed: `npm run build && npm test` runs the stdio smoke suite (202 checks: tool/resource/prompt inventory, the playbook tools, config report, brief create/validate/never-overwrite, the codebase layer against a fixture repo including a tsconfig alias that must resolve to a real file, the collective's repair pass, its computed verdict, its round-two conversation and its memory — including one invented quote that must be rejected and then repaired, withdrawn or left unaddressed by three different units, an unevidenced rebuttal that must be marked unproven, a memory entry whose code changed and must retire itself, and the session-install block covering each host's own instruction file — one file per host family, the host's own text never touched, and a removal that cleans every file it wrote — and every graceful error path).
 With keys, in Cursor chat: "run providers_config", then "run providers_test for each role", then "usage_report".
 Or: `npm run inspect`.
 
@@ -56,6 +56,14 @@ it is built on one rule: a claim about the code is only real if the server can r
   `quote-not-found`, `file-missing` or `outside-project` (refused, never read). No model is involved, so
   it cannot be talked round. Run your own claims through it before telling the user something about their
   code.
+- It also names the second way a citation fails, which finding the quote cannot catch: a quote that is
+  really there and shares no content word with the claim on top of it is flagged as **thin support** —
+  real line, wrong thing to hang on it. The label is deliberately one-sided: it can only ever downgrade a
+  claim, never certify one, because words in common are not entailment (non-entailing pairs with
+  near-perfect overlap are easy to construct: [HANS](https://arxiv.org/html/1902.01007v4)). Deciding that a
+  passage really supports a claim takes a reader, and the audits say how badly that goes unanswered: 51.5%
+  of generated sentences were fully supported by the citations attached to them and 25.5% of the citations
+  did not support their sentence at all ([Liu, Zhang & Liang](https://arxiv.org/html/2304.09848v2)).
 
 ### The collective (one leader, several copies of the model, quotes checked before anyone agrees)
 
@@ -68,11 +76,25 @@ it is built on one rule: a claim about the code is only real if the server can r
    with no memory of each other.
 3. The server re-reads **every quote** they made and deletes the ones that are not in the file where they
    say they are. Worker reports that fail to obey the contract are dropped whole, not softened.
-4. The **leader closes** the mission using only the checked evidence, and must name what stays unverified.
+4. A citation that failed goes **back to its own unit, once**, with the server's reason and the line the
+   quote actually lives at. It comes back either re-cited (re-checked at the same standard), replaced by a
+   different finding, withdrawn with a reason, or unaddressed — and the dossier keeps all four apart. The
+   first attempt stays in the rejected list: a repaired finding is added, never promoted.
+5. The **leader closes** the mission using only the checked evidence, and must name what stays unverified.
+   The dossier opens with a **verdict**: counts, not prose, computed from the gate's own results, with the
+   one grade they support.
 
-You get a dossier at `.design-mcp/collective/<id>.md` (job result and `collective_report`): what was
-concluded, the plan, every verified quote with its file and line, everything rejected and why, conflicts
-between units, admitted unknowns, the cost, and what the run explicitly did **not** check. `collective_plan`
+Everything above ends in a **verdict you can check by hand**: how many quotes the server re-read, how many
+findings it rejected, how many of those are still wrong at the end, how many units produced anything usable,
+whether the verifier showed up, and whether the closing pass ran. `STRONG` needs no outstanding citation, no
+thin support and no silent unit; `THIN` means fewer than two verified quotes or more than half the units
+producing nothing; with no verified quote at all it is `NOTHING`. A model writes none of it, so the closing
+paragraph cannot talk the grade up.
+
+You get a dossier at `.design-mcp/collective/<id>.md` (job result and `collective_report`): the verdict,
+what was concluded, the plan, every verified quote with its file and line, the quotes that are real but do
+not visibly back their claim, everything rejected and why, the repair pass and what it fixed or withdrew,
+conflicts between units, admitted unknowns, the cost, and what the run explicitly did **not** check. `collective_plan`
 is the same leader pass on its own, when you would rather dispatch the workers yourself. The prompt
 `collective_mission` writes out the protocol; `focus_contract` is the ground-rules brief for working in
 this repository (also the resource `code://focus`).
@@ -81,7 +103,7 @@ Cost: one model call for the plan, one per unit, one for round two per unit, one
 to `roles.worker` = `session`, so the copies are instances of the model you are already talking to and no
 API key is needed. Set `roles.leader`/`roles.worker` to a provider to run the collective somewhere else.
 Caps live under `collective` (`maxUnits`, `maxWorkers`, `contextTokensPerWorker`, `synthesize`,
-`peerRound`, `memory`, `memoryItems`, `memoryTokensInPrompt`, `keepDossiers`) and the codebase layer under
+`repairRound`, `peerRound`, `memory`, `memoryItems`, `memoryTokensInPrompt`, `keepDossiers`) and the codebase layer under
 `codebase` (`roots`, `ignore`, `maxFiles`, `maxFileKB`, `digestTokens`, `contextTokens`).
 
 ### Who they are
@@ -104,9 +126,9 @@ can settle is kept in the dossier for the owner rather than averaged away.
 
 The collective remembers between missions: claims whose quote the server itself re-read, claims it
 rejected (kept so nobody repeats them), and your own rulings (`collective_memory { action: "ruling" }`,
-which are permanent and never pruned). Admission is quality-gated — a claim needs a quote the server
-confirmed *and* a mission that reached a conclusion — and every entry is re-checked against the file as it
-is now when it is loaded. Anything whose code has changed or gone is marked stale, reported, and kept out
+which are permanent and never pruned).Admission is quality-gated — a claim needs a quote the server confirmed, a quote that visibly bears on the
+claim (thin support is kept out and reported), *and* a mission that reached a conclusion — and every entry is
+re-checked against the file as it is now when it is loaded. Anything whose code has changed or gone is marked stale, reported, and kept out
 of every prompt. Read it any time with `collective_memory`, or as the resource `code://memory`.
 
 ### Why it is built this way, and what the "AI society" stories really were
@@ -151,10 +173,29 @@ of cited statements were still unsupported ([SourceCheckup](https://reglab.stanf
 Which is why the dossier says, in as many words, that a verified quote proves the code says that and nothing
 more, and why nothing here reports agreement as proof.
 
-Limits, stated because they matter: symbol extraction is lightweight (line scanning, not a type checker),
-so treat a missing symbol as unknown rather than absent; tsconfig path aliases are not resolved, so those
-imports show up as external; and a verified quote proves the code says that, not that the conclusion drawn
-from it is correct. That is what the project's own gates are for — which the dossier tells you to run.
+Two more conclusions were read the same way and are now in the loop. **Feedback has to be specific to
+work**: one targeted repair after a reliable checker rejects something beats spending the same budget on
+repeated attempts ([Olausson et al.](https://arxiv.org/abs/2306.09896)), refinement gains are largest in the
+first round and shrink after it ([Madaan et al.](https://arxiv.org/html/2303.17651v2)), debugging
+effectiveness is reported to decay 60–80% within two to three attempts
+([Hao et al.](https://pmc.ncbi.nlm.nih.gov/articles/PMC12715212/)), and a model told to review its own answer
+without an external signal often makes it *worse* — GPT-3.5 on CommonSenseQA went 75.8% → 38.1% after one
+unguided correction round ([Huang et al.](https://arxiv.org/html/2310.01798v2)). So the server hands a rejected
+citation back to its own worker exactly once, carrying the line the quote really lives at, and never lets that
+pass touch a finding that already verified — correction rounds also break answers that were right
+([Chen et al.](https://arxiv.org/html/2311.08516v3): losses of 0–11.4 points on initially correct answers).
+And **a check that cannot see meaning must only ever downgrade**: the thin-support label fires when a real
+quote shares no wording with its claim, and it never fires the other way, because overlap is not entailment.
+The label is not a reading of the passage, and it says so where it is shown.
+
+Limits, stated because they matter: symbol extraction is lightweight (line scanning, not a type checker), so
+treat a missing symbol as unknown rather than absent; `tsconfig`/`jsconfig` `paths` **are** resolved (from the
+shallowest config, `extends` not followed), so anything an alias cannot reach still shows up as an external
+and a repo whose aliases live behind `extends` will look partly external; the repair pass is one pass by
+design and gives a worker nothing that already verified; the support label is one-sided, so shared wording is
+not proof of anything; the verdict is arithmetic over citations and not a judgement of the answer; and a
+verified quote proves the code says that, not that the conclusion drawn from it is correct. That is what the
+project's own gates are for — which the dossier tells you to run.
 
 Server state (index, dossiers, jobs, shots, parked prompts) all lives under `.design-mcp/` in the project
 being worked on, so add it to that project's `.gitignore`.
@@ -179,12 +220,28 @@ It is cheap because it runs at the top of every session, and it is honest about 
 > server side alone. It is carried by the one thing a host already reads on its own: the repository's own
 > instruction file.
 
-`collective_install` writes one short marked block into `AGENTS.md` (and `CLAUDE.md`, when the repo has one)
-telling the host to call `collective_hello` at the start of a session in that repo and whenever you say
-"Hello collective.". It is idempotent (a second install writes nothing), it never touches a character
-outside its own markers, `action: "show"` previews without writing, and `action: "remove"` takes it back
-out. If your host ignores instruction files, the block is inert and the greeting still works the moment
-anything calls it — and if you have no API keys at all, none of this needs one.
+`collective_install` writes one short marked block into the files the hosts actually read, telling them to
+call `collective_hello` at the start of a session in that repo and whenever you say "Hello collective.":
+
+| File | Read by |
+| --- | --- |
+| `AGENTS.md` | Codex, Cursor, GitHub Copilot, Windsurf, Freebuff |
+| `CLAUDE.md` or `.claude/CLAUDE.md` | Claude Code — its default reads the CLAUDE file *instead of* AGENTS.md when one exists |
+| `GEMINI.md` | Gemini CLI (it does not read AGENTS.md unless `context.fileName` lists it) |
+| `.github/copilot-instructions.md` | GitHub Copilot, repo-wide |
+| `.windsurfrules` | Windsurf, legacy single file |
+
+One file per host family — a repo with both `CLAUDE.md` and `.claude/CLAUDE.md` gets the block in the root
+one only — so no host is told twice. It only ever *creates* `AGENTS.md`, because that is the file the most
+hosts read; the hosts whose own file does not exist are named in the report, with the exact
+`targets: ["GEMINI.md"]`-style argument if you want them created too. Rule directories are deliberately left
+alone: `.cursor/rules/*.mdc` and `.windsurf/rules/*.md` are ignored without frontmatter, so a plain block
+dropped there would do nothing.
+
+It is idempotent (a second install writes nothing), it never touches a character outside its own markers,
+`action: "show"` previews without writing, and `action: "remove"` takes it back out of every file it wrote.
+If your host ignores instruction files, the block is inert and the greeting still works the moment anything
+calls it — and if you have no API keys at all, none of this needs one.
 
 ### Your skills, and what "run a skill" can honestly mean
 
