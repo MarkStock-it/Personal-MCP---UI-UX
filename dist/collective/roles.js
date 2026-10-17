@@ -69,10 +69,31 @@ export const RepairSchema = z.object({
     findings: z.array(FindingSchema).max(20).default([]),
     dropped: z.array(z.object({ claim: z.string().min(5), why: z.string().min(5) })).max(20).default([]),
 });
+/**
+ * The edit repair pass's contract.
+ *
+ * Narrower than a worker report on purpose: steps (re-placed) and withdrawals (with a reason), and nothing
+ * else. `fixes` is the 1-based number of the rejected step a returned step replaces, so the server can tell
+ * a fixed step from a new one by arithmetic rather than by asking a model to match them up — the same
+ * reason every other judgement here is deterministic.
+ */
+export const EditRepairSchema = z.object({
+    note: z.string().max(600).default(""),
+    steps: z.array(StepSchema.extend({ fixes: z.number().int().min(1) })).max(12).default([]),
+    dropped: z.array(z.object({ fixes: z.number().int().min(1), why: z.string().min(5) })).max(12).default([]),
+});
 export const SynthesisSchema = z.object({
     answer: z.string().min(20),
     plan: z
-        .array(z.object({ step: z.string().min(5), path: z.string().optional(), intent: z.string().min(5), risk: z.enum(["low", "medium", "high"]).default("medium") }))
+        .array(z.object({
+        step: z.string().min(5),
+        path: z.string().optional(),
+        intent: z.string().min(5),
+        /* Where the edit lands, so the server can check it: an existing symbol or the exact line it sits next to. */
+        anchor: z.string().min(2).optional(),
+        lines: Tup.optional(),
+        risk: z.enum(["low", "medium", "high"]).default("medium"),
+    }))
         .max(20)
         .default([]),
     risks: z.array(z.string()).max(10).default([]),
@@ -89,7 +110,11 @@ export const CITATION_CONTRACT = `CITATION CONTRACT (the server enforces this me
 - "unknowns" is the correct place for anything the context does not answer. Write "unknown" or "not in
   the provided context" rather than a plausible guess. A guess is a defect, not a filler.
 - Never invent a file, path, function, export, config key, script name or command line. If you did not
-  see it in the context, it does not exist for you.`;
+  see it in the context, it does not exist for you.
+- "steps" go through the same gate: the path must exist, and the anchor must really be in that file at the
+  lines you cite. A step whose anchor is not there is reported as an edit that cannot be applied, so put a
+  real symbol or a real line in "anchor" — or leave the anchor out and say in "unknowns" that you could
+  not place the edit. Where you cannot place it, say that rather than picking a line that looks close.`;
 export function leaderSystem(maxUnits, skills) {
     return `${personaBlock(LEADER)}
 
@@ -268,6 +293,149 @@ export function repairUser(unit, pack, rejected, memory) {
         .filter(Boolean)
         .join("\n");
 }
+/** The heading the edit-repair prompt carries, so a host (or a test stub) can recognise the call. */
+export const EDIT_REPAIR_MARKER = "AN EDIT THAT COULD NOT BE PLACED";
+const EDIT_REPAIR_RULES = `The server re-read the files these steps named. They cannot be applied as described — its own
+reasons are below, one per step.
+
+Rules:
+- Fix only the steps listed. Steps that placed correctly are not in scope: do not restate them, do not
+  resend them, do not reword them.
+- Every step you return must carry "fixes": the number of the step it replaces. That number is how the
+  server knows which of your answers replies to which of its questions, and it is not optional.
+- Re-place a step by naming a path that exists in the context you are given, and an "anchor" that is really
+  in that file at the "lines" you cite — an existing symbol or the exact text of those lines. The server
+  re-reads that file and checks precisely that, so an anchor you have not seen there will fail again.
+- Where you cannot place a step, withdraw it in "dropped" with the reason ("the file does not contain the
+  symbol this step assumes"). Withdrawing is a correct answer and costs nothing. A guess is a defect.
+- Do not invent a file to save a step. If the only honest placement is in a file you were not given, withdraw
+  it and name the file you would need in the reason.
+- There is no third attempt: a withdrawn or unplaced step is finished.`;
+/**
+ * The edit repair pass, for a unit that proposed a step the gate could not place. Same seat, same voice, one
+ * job — and the same instruction the citation repair gives: fix what was rejected, touch nothing else.
+ */
+export function editRepairSystem(role, skill) {
+    return `${personaBlock(PERSONAS[role])}
+
+You are ${PERSONAS[role].handle}, the same worker as before, on a REPAIR PASS for the EDITS you proposed.
+Your findings were checked already; this pass is only about where your changes land.
+
+${EDIT_REPAIR_RULES}
+${skillBlock(skill)}
+${CITATION_CONTRACT}
+
+Reply with a single JSON object, no prose:
+{"note":"one line on what you re-placed or withdrew",
+ "steps":[{"fixes":1,"path":"...","intent":"...","anchor":"existing symbol or exact line","lines":[1,1],"risk":"low|medium|high"}],
+ "dropped":[{"fixes":2,"why":"..."}]}`;
+}
+/** The same pass for the leader's own closing plan, whose steps go through the same gate. */
+export function editRepairLeaderSystem() {
+    return `You are the LEADER, on a REPAIR PASS for the steps of the plan you just wrote. The server checked
+every step against the file it named and some could not be applied as described.
+
+${EDIT_REPAIR_RULES}
+
+Reply with a single JSON object, no prose:
+{"note":"one line on what you re-placed or withdrew",
+ "steps":[{"fixes":1,"path":"...","intent":"...","anchor":"existing symbol or exact line","lines":[1,1],"risk":"low|medium|high"}],
+ "dropped":[{"fixes":2,"why":"..."}]}`;
+}
+export function editRepairUser(i) {
+    return [
+        `${EDIT_REPAIR_MARKER} — ${i.who}${i.objective ? ` (${i.objective})` : ""}`,
+        i.placedElsewhere
+            ? `${i.placedElsewhere} step(s) from the same source placed correctly and are NOT below: do not restate them, do not resend them.`
+            : "Nothing else of yours is in scope.",
+        i.memory ? `\n${i.memory}` : "",
+        "",
+        "=== THE STEPS THE SERVER COULD NOT PLACE (this is the whole reason for this pass) ===",
+        ...i.rejected.map((r) => [
+            `${r.index}. [${r.status}] ${r.path || "(no path)"}${r.lines ? `:${r.lines[0]}-${r.lines[1]}` : ""} — ${r.intent.replace(/\s+/g, " ").slice(0, 200)}`,
+            r.anchor ? `   you anchored it on: "${r.anchor.replace(/\s+/g, " ").slice(0, 200)}"` : "   you gave no anchor and no line range",
+            r.detail ? `   the server says: ${r.detail.replace(/\s+/g, " ").slice(0, 300)}` : "",
+        ]
+            .filter(Boolean)
+            .join("\n")),
+        "=== END ===",
+        "",
+        "=== THE FILES THE SERVER READ FOR YOU (real source, real line numbers — the anchor has to be in here) ===",
+        i.pack,
+        "",
+        "=== END SOURCE ===",
+        `Re-place or withdraw those ${i.rejected.length} step(s) now, and nothing else. Each returned step needs "fixes" set to the number above.`,
+    ]
+        .filter(Boolean)
+        .join("\n");
+}
+/**
+ * The conclusion repair pass. Same seat that wrote the closing paragraph, one job: the sentences the
+ * server can show contradict this mission's own record. Written the way the other two repair prompts are,
+ * because the failure mode is the same — a model asked to "improve" prose rewrites everything, including
+ * the parts that were fine and cited.
+ */
+export const CONCLUSION_REPAIR_MARKER = "A CONCLUSION THE RECORD CONTRADICTS";
+const CONCLUSION_REPAIR_RULES = `Rules for this pass, and there is no second one:
+- Answer ONLY the numbered sentences below. Do not rewrite the rest of the conclusion, do not add claims,
+  do not touch the plan, do not restate what was fine.
+- For each sentence you have two honest moves: rewrite it so it says only what this mission's checked
+  evidence and record support, or give it up with a reason if it cannot be said honestly at all.
+- A rejected finding is not repaired by rephrasing the same fact. Say what the record does support, or
+  mark it as something to check ("unverified", "the server rejected this claim", "not established").
+- Every path you name must be in the file list below, spelled exactly as it is written there. If the
+  sentence named a file that is not in that list, the file does not exist for you.
+- Withdrawing is respectable: a sentence that says nothing is better than one the mission's own record
+  contradicts. Silence is not free though — the reason you give is kept and shown next to it.`;
+export function conclusionRepairSystem() {
+    return `You are the LEADER, and you wrote the closing paragraph of this mission. The server checked it
+against this mission's own record, sentence by sentence, and some sentences assert something that record
+does not contain.
+
+${CONCLUSION_REPAIR_RULES}
+
+Reply with a single JSON object, no prose:
+{"note":"one line on what you changed",
+ "fixed":[{"fixes":1,"text":"the replacement sentence, saying only what the record supports"}],
+ "dropped":[{"fixes":2,"why":"why this sentence cannot be said honestly"}]}`;
+}
+export function conclusionRepairUser(i) {
+    return [
+        `${CONCLUSION_REPAIR_MARKER} — the closing paragraph you wrote for: ${i.mission}`,
+        i.memory ? `\n${i.memory}` : "",
+        "",
+        "=== THE SENTENCES THE RECORD CONTRADICTS (this is the whole reason for this pass) ===",
+        ...i.issues.flatMap((s) => [
+            `${s.index}. [${s.kind}] ${s.field} — you wrote: "${s.text.replace(/\s+/g, " ").slice(0, 300)}"`,
+            `   the record says: ${s.because.replace(/\s+/g, " ").slice(0, 400)}`,
+        ]),
+        "=== END ===",
+        "",
+        "=== WHAT THE GATE REJECTED IN THIS MISSION (never state any of these as a fact) ===",
+        ...(i.rejected.length ? i.rejected.slice(0, 20).map((r) => `  - ${r.replace(/\s+/g, " ").slice(0, 240)}`) : ["  - (nothing was rejected in this mission)"]),
+        "=== END ===",
+        "",
+        `=== THE FILES THIS REPOSITORY HAS${i.fileCount > i.files.length ? ` (showing ${i.files.length} of ${i.fileCount})` : ` (${i.fileCount})`} ===`,
+        ...i.files.map((f) => `  ${f}`),
+        i.fileCount > i.files.length ? `  ... and ${i.fileCount - i.files.length} more, not listed. Do not name a file you cannot see in this list.` : "",
+        "=== END ===",
+        "",
+        `Answer those ${i.issues.length} sentence(s) now — each with "fixes" set to the number above — and nothing else.`,
+    ]
+        .filter(Boolean)
+        .join("\n");
+}
+export const ConclusionRepairSchema = z.object({
+    note: z.string().default(""),
+    fixed: z
+        .array(z.object({ fixes: z.number().int(), text: z.string().min(8) }))
+        .max(20)
+        .default([]),
+    dropped: z
+        .array(z.object({ fixes: z.number().int(), why: z.string().min(8) }))
+        .max(20)
+        .default([]),
+});
 export function synthesisSystem() {
     return `You are the LEADER, closing the mission. Your workers have reported, and every finding you are
 about to read has already been checked against the source: the quote was found in the file at the cited
@@ -279,9 +447,17 @@ Rules:
   "unverified" instead, phrased as something to check.
 - Keep the workers' independence: when two units agree, say so; when they disagree, say which evidence
   is stronger and what would settle it. Do not average a disagreement away.
-- "plan" is the ordered work a single careful engineer would now do, with file paths and risk.
+- "plan" is the ordered work a single careful engineer would now do, with file paths, risk, and — for each
+  step — the anchor it lands on: an existing symbol or the exact line of code the edit sits next to, plus
+  the line range when you know it. The server checks every step's path and anchor against the file before
+  the owner reads the plan; a step anchored to something that is not there is reported as an edit that
+  cannot be applied, so leave the anchor out where you cannot honestly place it.
 - "firstAction" is one concrete next action. "definitionOfDone" is how we will know it worked — the
   commands in the digest matter here.
+- Your paragraph is checked against this mission's own record before the owner reads it: a sentence that
+  asserts a finding the gate deleted, states a THIN SUPPORT quote as established, or names a file that is
+  not in this repository comes back to you once to be rewritten or given up with a reason. Hedged wording
+  that carries a rejection ("the server rejected this claim; it is carried as unverified") is correct.
 - Be concise. No restating the mission, no praise, no filler.
 
 Reply with a single JSON object, no prose:

@@ -9,6 +9,9 @@
  * project's own .gitignore decides what is source, and the walk is one process instead of thousands of
  * stats. Outside a repo it falls back to a walk with the configured ignore list. Either way, nothing
  * outside the configured roots is ever read.
+ *
+ * It also reads the project's own tsconfig/jsconfig `paths` map, because an unresolved alias makes the
+ * import graph quietly wrong (see readPathAliases).
  */
 import { execFile } from "node:child_process";
 import fs from "node:fs/promises";
@@ -54,7 +57,16 @@ export interface ScanResult {
   skipped: Skipped[];
   notes: string[];
   conventions: Conventions;
+  /** The project's own `paths` map from tsconfig/jsconfig, so `@/x` is not mistaken for a package. */
+  aliases: PathAlias[];
   ms: number;
+}
+
+/** One entry of a tsconfig `paths` map, with the directory its targets are relative to. */
+export interface PathAlias {
+  pattern: string;
+  targets: string[];
+  base: string;
 }
 
 export interface LightEntry { path: string; bytes: number; mtimeMs: number }
@@ -162,6 +174,49 @@ export async function readSource(projectRoot: string, rel: string): Promise<stri
   }
 }
 
+/** tsconfig.json is JSON with comments in it, and jsconfig.json is the same for JS projects. */
+function stripJsonNoise(text: string): string {
+  return text
+    .replace(/"(?:\\.|[^"\\])*"|\/\/[^\n]*|\/\*[\s\S]*?\*\//g, (m) => (m.startsWith("/") ? "" : m))
+    .replace(/,(\s*[}\]])/g, "$1");
+}
+
+/**
+ * The project's own path aliases (tsconfig/jsconfig `paths` + `baseUrl`).
+ *
+ * Without this, an import of `@/lib/util` is indistinguishable from an import of `lodash`: it lands in the
+ * "third-party surface" list and — worse — the edges that decide who breaks when a file changes are missing
+ * from the graph, so `code_context`'s one hop never leaves the seed file in a repo that uses `@/` everywhere.
+ * Only `paths` and `baseUrl` are read, from the shallowest config, and `extends` is not followed: this is a
+ * path map, not a type checker, and anything it cannot see is reported as unresolved rather than guessed at.
+ */
+export async function readPathAliases(projectRoot: string, files: { path: string }[]): Promise<PathAlias[]> {
+  const config = files
+    .filter((f) => /(^|\/)(tsconfig|jsconfig)\.json$/.test(f.path))
+    .sort((a, b) => a.path.split("/").length - b.path.split("/").length || a.path.localeCompare(b.path))[0];
+  if (!config) return [];
+  let raw: string;
+  try {
+    raw = await fs.readFile(path.join(projectRoot, config.path), "utf8");
+  } catch {
+    return [];
+  }
+  let parsed: { compilerOptions?: { baseUrl?: string; paths?: Record<string, string[]> } };
+  try {
+    parsed = JSON.parse(stripJsonNoise(raw)) as typeof parsed;
+  } catch {
+    return [];
+  }
+  const opts = parsed.compilerOptions ?? {};
+  const dir = path.posix.dirname(config.path);
+  const base = path.posix.normalize(path.posix.join(dir === "." ? "" : dir, opts.baseUrl ?? ".")).replace(/^\.\//, "");
+  return Object.entries(opts.paths ?? {})
+    .filter(([pattern, targets]) => pattern.length > 0 && Array.isArray(targets) && targets.length > 0)
+    // Most specific first: an exact pattern beats a wildcard, and a longer wildcard beats a shorter one.
+    .map(([pattern, targets]) => ({ pattern, targets: targets.filter((t) => typeof t === "string"), base }))
+    .sort((a, b) => (a.pattern.includes("*") ? 1 : 0) - (b.pattern.includes("*") ? 1 : 0) || b.pattern.length - a.pattern.length);
+}
+
 export async function scanRepo(projectRoot: string, opts: ScanOptions): Promise<ScanResult> {
   const t0 = Date.now();
   const { files: list, notes } = await listFiles(projectRoot, opts);
@@ -202,7 +257,7 @@ export async function scanRepo(projectRoot: string, opts: ScanOptions): Promise<
     files.push({ path: rel, lang, bytes: buf.length, lines: lines.length, symbols: extracted.symbols, imports: extracted.imports });
   }
 
-  return { root: projectRoot, files, skipped, notes, conventions: await conventionsFor(projectRoot, files), ms: Date.now() - t0 };
+  return { root: projectRoot, files, skipped, notes, conventions: await conventionsFor(projectRoot, files), aliases: await readPathAliases(projectRoot, files), ms: Date.now() - t0 };
 }
 
 const TEST_PATH = /(^|\/)(test|tests|__tests__|spec)\/|\.(test|spec)\.|smoke\/|(^|\/)test/i;

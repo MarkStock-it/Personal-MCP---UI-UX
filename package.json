@@ -9,7 +9,7 @@
   },
   "scripts": {
     "build": "tsc",
-    "smoke": "node smoke/smoke.mjs",
+    "smoke": "node smoke/smoke.mjs && node smoke/arithmetic.mjs",
     "test": "npm run smoke",
     "dev": "tsx src/index.ts",
     "start": "node dist/index.js",

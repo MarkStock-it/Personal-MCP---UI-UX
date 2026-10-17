@@ -8,26 +8,39 @@ Node >= 20, TypeScript, ESM. `dist/` is committed because the host runs `dist/in
 ```bash
 npm install
 npm run build          # tsc -> dist/
-npm test               # 202-check keyless stdio suite (smoke/smoke.mjs); no API keys needed
+npm test               # 342-check keyless gate: smoke/smoke.mjs (261, stdio suite) + smoke/arithmetic.mjs (81, the built modules driven directly); no API keys needed
 DESIGN_MCP_PROJECT_DIR=<dir> node smoke/call.mjs <tool> '[json]'   # call one tool
 npm run inspect        # MCP inspector
 npx tsx tools/lab/run.ts   # the memory experiment; see tools/lab/README.md (not a gate)
 ```
 `npm test` is the gate: it asserts the tool/resource/prompt inventory, the playbook tools, the
 deterministic checks, the codebase layer against a fixture repo (including a tsconfig alias that must come
-back as an internal edge and not as a package), two whole collective missions (driven by a stub host that
+back as an internal edge and not as a package), four whole collective missions (driven by a stub host that
 answers sampling, including one deliberately invented quote that must be rejected and then handed back in
 the repair pass — one unit re-cites it, one withdraws it with a reason, one never addresses it, and the
 three outcomes must stay distinguishable — a quote that is real but shares no wording with its claim, an
-unevidenced rebuttal that must be labelled unproven, and a memory entry whose code changes and must retire
-itself), the computed verdict the mission counts for itself, the session greeting and the skills layer (a
+unevidenced rebuttal that must be labelled unproven, two of the four missions with the closing paragraph
+armed so it asserts that deleted finding as fact and names a file that does not exist — one mission with the
+conclusion pass off, where both sentences stand and the grade cannot reach `STRONG`, and one with it on,
+where the stub rewrites one sentence into wording that restates the rejection and gives the other up with a
+reason — and a memory entry whose code changes and must retire itself), the computed verdict the mission
+counts for itself, the session greeting and the skills layer (a
 fixture SKILL.md that must be found, read, and pasted into exactly the worker that was assigned it), the
-session-block installer (idempotent, and it must not touch text outside its markers), and every graceful
-error path. It must be 202/202 before any change is called done.
+edit gate over the edits those missions proposed (an invented file, a real anchor cited at stale lines, an
+anchor that occurs three times, the snapshot hash, the closing plan's own steps), the session-block
+installer (idempotent, and it must not touch text outside its markers), and every graceful
+error path. `smoke/arithmetic.mjs` (55 checks) then drives the built edit gate, the built merge and the built verdict directly, because
+neither is reachable through a mission at reasonable cost: the full status matrix (anchored, stale,
+ambiguous, not found, out of range, missing, refused, unindexed, and the import-graph impact behind each)
+and every grade rule (a clean run is `STRONG`; one unapplicable edit, one wrong citation, one thin quote, one
+silent unit, no closing pass or one sentence of that paragraph that still contradicts the record are each
+enough to stop it, and a step that was re-placed by the edit repair pass or a sentence the conclusion pass
+rewrote to stand on the record stops counting). It must all pass — 342/342 (261 + 81) — before
+any change is called done.
 
 ## Map
-- `src/index.ts` — the MCP surface: 15 generating/testing tools, 6 playbook tools, 8 codebase/collective
-  tools (code_index, code_digest, code_context, code_verify_cites, collective_plan, collective_run,
+- `src/index.ts` — the MCP surface: 15 generating/testing tools, 6 playbook tools, 10 codebase/collective
+  tools (code_index, code_digest, code_context, code_refs, code_verify_cites, code_verify_edits, collective_plan, collective_run,
   collective_report, collective_memory), 4 session/skill tools (collective_hello, collective_install,
   skills_list, skills_read), 11 `design://` + 7 `code://` resources, 5 prompts. Registered at
   the bottom; the codebase and collective blocks are clearly marked. The smoke suite asserts these counts,
@@ -35,9 +48,31 @@ error path. It must be 202/202 before any change is called done.
 - `src/codebase/` — ground truth about the repo, computed from the files, no model involved. `symbols.ts`
   extracts declarations and imports (**read the header before changing it**: line-oriented comment
   stripping and span rules exist because two real bugs came from getting them wrong), `scan.ts` lists and
-  reads files (git ls-files so `.gitignore` decides, walk otherwise) and detects conventions, `store.ts`
-  is the cached index + digest/map/graph/conventions renderers, `pack.ts` turns a question into
-token-budgeted source slices with the file's own line numbers.
+  reads files (git ls-files so `.gitignore` decides, walk otherwise) and detects conventions, `store.ts`  is the cached index + digest/map/graph/conventions renderers, `pack.ts` turns a question into
+  token-budgeted source slices with the file's own line numbers, and `refs.ts` answers "who declares this
+  name, who uses it" with a word-boundary text scan (`code_refs`) plus the bounded rename surface the edit
+  gate uses. Read its header before trusting it as more than a scan: it counts a match in a comment, a
+  string or an unrelated same-named local, and it cannot see a dynamic reference — never present it as
+  semantic analysis, and never let anything rename or delete on its word alone.
+- `src/collective/edits.ts` — the edit gate: the same re-read-the-file suspicion as `verify.ts`, pointed at
+the edits a mission proposes instead of the claims it makes. Read its header before widening it: line
+numbers belong to the snapshot it records, an ambiguous anchor is not placed, and the import-graph impact
+comes from the index rather than from the intent's wording.
+- `src/collective/editrepair.ts` — the edit repair pass: a step the edit gate could not place goes back to
+its own source ONCE, with the server's reason, and what comes back is re-gated at the same standard. Read
+its header before widening it, because every rule there is load-bearing: one pass, repair-only-adds (a step
+that already landed is never re-sent), a returned step is matched to a rejected one by its `fixes` number
+rather than by a model's memory, a withdrawal with a reason is a recorded outcome, and a path outside the
+project is a refusal rather than something to iterate on.
+- `src/collective/conclusion.ts` — the conclusion gate: the closing paragraph against the mission's own
+record, one sentence at a time. Read its header before widening it, because the boundaries are the design:
+`unverified` is exempt (it is where a rejection belongs), hedged wording is not an assertion, matching is
+content-word overlap and deliberately one-sided, only a file that is in neither the index nor on disk counts
+as invented, and the split is deterministic so a repair can answer by number. It decides whether a paragraph
+contradicts the record, never whether it is right. `conclusionrepair.ts` is the one pass that hands a flagged
+sentence back to the leader with the record's words and the real file list, then re-checks the *whole*
+paragraph (a rewrite can put a new contradiction where the old one was), keeping the two honest outcomes
+distinct: rewritten-and-re-checked, or given up with a reason that is shown next to the sentence it removes.
 - `src/collective/` — the multi-agent layer. `roles.ts` holds the contracts and prompts (the citation
   contract lives there and is repeated to every worker), `ask.ts` is one schema-checked model call with a
   single repair round, `verify.ts` re-reads every quote and is the only thing allowed to call a claim
@@ -107,6 +142,20 @@ future reader can disagree with the conclusion.
   `found-elsewhere`), the first attempt stays in `rejected` for the record, and a claim the worker
   withdraws is recorded as withdrawn rather than deleted. A repair ADDS evidence; it never upgrades a
   rejection.
+- **An anchor is checked like a citation, or not at all.** Every proposed edit goes through `edits.ts`:
+the path must exist, an anchor must really be in that file at the cited lines, an anchor that occurs more
+than once with no line range is `anchor-ambiguous` rather than assumed, and each checked edit carries the
+file's snapshot hash so a stale line number is detectable. When the anchor is a plain identifier the impact
+line also names the call sites it found (`refs.ts`, bounded to the rename surface), and those are a text
+scan like everything else in that module. The rules that must not be relaxed: `broken`
+(no such file, anchor not found, lines past the end) stops a run grading `STRONG`, an `unanchored` edit says
+only that its path exists, and the gate never claims to have applied or judged the change. If you add a way
+for an edit to reach the dossier without passing here, you have removed the point of the module.
+- **A step that could not be placed gets one second chance, not an infinite one.** `editrepair.ts` hands the
+step back with the gate's own reason (where the anchor really is, how many times it occurs, that the range is
+past the end) and re-gates the answer. Never let it loop, never let a returned step skip the gate, never count
+a step as settled because its author said it was: only `verifyEdits` decides, and the settled keys are what
+stop a superseded step from holding the verdict down.
 - **A found quote is only half of a citation.** `verify.ts` labels a verified quote that shares no content
   word with its claim as thin support, and that label is one-sided on purpose: it can only ever downgrade.
   Never report it as entailment, never let a thin claim into memory (see `memory.ts`), and keep the
@@ -199,8 +248,9 @@ This repository has a codebase-grounded collective available over MCP (server `d
   already established or already got wrong here, the open missions and the skills the owner installed.
   Answer from that, never from memory of this repo.
 - Ground every statement about this code in `code_digest` / `code_context`, check it with
-  `code_verify_cites`, and run real work through `collective_plan` / `collective_run`. The full ground
-  rules are the resource `code://focus`.
+  `code_verify_cites`, check where a change would land with `code_verify_edits` before you make it,
+  and run real work through `collective_plan` / `collective_run`. The full ground rules are the resource
+  `code://focus`.
 - The owner's installed skills are `skills_list` (resource `code://skills`); `skills_read` returns one in
   full. A collective unit can be assigned a skill, whose text then goes into that worker's prompt.
 - Finish by running this project's own gates and reporting what was verified by running, what only by

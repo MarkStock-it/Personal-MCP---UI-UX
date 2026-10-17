@@ -23,7 +23,9 @@ import { renderPalette, paletteCheck, renderSlopFindings, scanSlop } from "./pla
 import { RUBRIC_SECTIONS } from "./playbook/rubric.js";
 import { packContext, renderPack } from "./codebase/pack.js";
 import { estimateTokens, getIndex, renderConventions, renderDigest, renderGraph, renderMap, summarizeIndex } from "./codebase/store.js";
+import { findReferences, renderReferences } from "./codebase/refs.js";
 import { askJson } from "./collective/ask.js";
+import { EDIT_STATUS_MEANING, renderEditCheck, verifyEdits } from "./collective/edits.js";
 import { renderFocusContract } from "./collective/focus.js";
 import { addRuling, clearMemory, loadMemory, renderMemoryReport } from "./collective/memory.js";
 import { LeaderPlanSchema, leaderSystem, leaderUser } from "./collective/roles.js";
@@ -660,6 +662,70 @@ server.registerTool("code_verify_cites", {
         return fail(e);
     }
 });
+server.registerTool("code_verify_edits", {
+    title: "Check where an edit lands, before you make it",
+    description: "The same gate as code_verify_cites, pointed at the work instead of the claims. Give it the edits you or a worker are about to make: a path, and where possible an anchor (the symbol or the exact line the edit sits next to) and a line range. It re-reads each file and answers whether the edit can be applied as described — anchored, anchor-elsewhere (the anchor is real but the line numbers are stale), anchor-ambiguous (the anchor occurs more than once and no line range says which one), anchor-not-found (the anchor is not in that file at all), lines-out-of-range, no-such-file, outside-project, or unanchored when there was nothing to check but the path. For each edit it also reads the index's import graph and reports what a change there can break: how many indexed files import it, which of them are tests, and whether the anchor is declared in a different file, which means the edit sits at a use site and a rename would have to sweep that declaration's importers. Every checked edit carries the sha256 of the file exactly as it was read, so a re-check can tell whether the cited line numbers are still the ones that were checked. No model is involved and nothing is ever applied: this says where an edit lands, never whether the change is right. Run it before you hand the owner an edit, and run it on a dossier's plan before you follow that plan.",
+    inputSchema: {
+        edits: z
+            .array(z.object({
+            path: z.string().min(1),
+            anchor: z.string().optional().describe("The symbol, name or exact line of code the edit sits next to"),
+            lines: z.tuple([z.number().int().min(1), z.number().int().min(1)]).optional(),
+            intent: z.string().optional().describe("What the edit is meant to do, for the report"),
+            risk: z.enum(["low", "medium", "high"]).optional(),
+        }))
+            .min(1)
+            .max(50),
+    },
+}, async ({ edits }) => {
+    try {
+        const { config } = loadConfig();
+        const { index } = await getIndex(projectDir(), config.codebase, {});
+        const proposed = edits.map((e, i) => ({ source: "caller", sourceIndex: i, path: e.path, intent: e.intent ?? "(no intent given)", anchor: e.anchor, lines: e.lines, risk: e.risk }));
+        const check = await verifyEdits({ projectRoot: projectDir(), index, edits: proposed });
+        return ok([
+            renderEditCheck(check, { heading: false, limit: 30 }),
+            "",
+            "What the statuses mean:",
+            ...Object.entries(EDIT_STATUS_MEANING).map(([k, s]) => `  - ${k}: ${s}`),
+            "",
+            check.broken
+                ? "Do not apply the edits above that cannot be applied as described: an edit anchored to something that is not in the file is a guess about where the code goes. Re-cite it (the report says where the closest line is) or drop it."
+                : "Every edit landed where it says it does. If the file hashes differently now, the line numbers are stale: re-check rather than guess.",
+        ].join("\n"));
+    }
+    catch (e) {
+        return fail(e);
+    }
+});
+server.registerTool("code_refs", {
+    title: "Who declares this name, and who uses it",
+    description: "The question the import graph cannot answer: for one symbol or identifier, every place it is declared and every place it is used, with the real file, line and text of each. Use it before a rename, a signature change or a deletion — 'this file imports that one' is not the same as 'this code calls that function', and a file that never imports it can still name it in a test title or a string. Declarations come first, with their kind and whether they are exported; if nothing declares the name, the report says so and tells you to treat it as external until you find the definition. It is a word-boundary text scan over the indexed files, not a type checker: a match inside a comment or a string counts, a same-named local in an unrelated file counts, and a name reached dynamically is invisible — read the lines before acting on them. Deterministic and keyless: no model, no language server, no build. Files the index skipped (binary, minified, over the size cap, outside the configured roots) are never scanned, and the report says which caps it hit.",
+    inputSchema: {
+        name: z.string().min(2).describe("The identifier or symbol name, e.g. formatMoney or verifyReports"),
+        paths: z.array(z.string()).optional().describe("Restrict the scan to these files (the rename surface), instead of every indexed file"),
+        limit: z.number().int().min(1).max(200).optional().describe("How many uses to quote; defaults to 40"),
+    },
+}, async ({ name, paths, limit }) => {
+    try {
+        const { config } = loadConfig();
+        const { index } = await getIndex(projectDir(), config.codebase, {});
+        const report = await findReferences({ projectRoot: projectDir(), index, name, only: paths });
+        const next = report.declarations.length
+            ? [
+                "",
+                `Before you change it: ${report.declarations.length} declaration(s), ${report.uses.length} use(s) quoted. If the declaration is exported, the importers named above are the ones a signature change reaches; if it is not exported, the uses in its own file are the whole surface.`,
+            ]
+            : [
+                "",
+                "No declaration in the indexed files. That means one of three things — a dependency, a file the index skipped, or a name you have just invented. Check before you use it in code.",
+            ];
+        return ok([renderReferences(report, { limit: limit ?? 40 }), ...next].join("\n"));
+    }
+    catch (e) {
+        return fail(e);
+    }
+});
 /* ---- the collective: one leader, several copies of the model, quotes checked before anyone agrees ---- */
 function renderPlan(plan, known) {
     return [
@@ -725,7 +791,7 @@ server.registerTool("collective_plan", {
 });
 server.registerTool("collective_run", {
     title: "Run the collective on a mission",
-    description: "The full loop, in the background, for one mission: a leader plans from the repo's digest, the units answer in parallel on their own slices of real source, the server re-reads every quote and deletes what does not survive, the copies then read each other's verified findings (round two), the leader closes with what remains, and what was solid enough is remembered for the next mission. Returns a job id immediately — poll with design_status. The dossier lands in .design-mcp/collective/<id>.md, is the job result, and is readable with collective_report: it carries the verified quotes, the rejected claims, the conversation, disagreements nobody settled, and what the run did not check. Workers run on roles.worker (your host model via sampling by default, so no key), one model call per unit plus one for round two.",
+    description: "The full loop, in the background, for one mission: a leader plans from the repo's digest, the units answer in parallel on their own slices of real source, the server re-reads every quote and deletes what does not survive, a citation the gate rejected goes back to its own unit once to be re-quoted or withdrawn, the copies then read each other's verified findings (round two), the leader closes with what remains, and both the closing paragraph and every step the mission proposes are checked before anyone reads them — a sentence that asserts a finding the gate deleted, states a thin-support quote as established or names a file that is not in the repository goes back to the leader once, and a step that cannot be placed goes back to its own source once, with the server's reason, and both are re-checked. Returns a job id immediately — poll with design_status. The dossier lands in .design-mcp/collective/<id>.md, is the job result, and is readable with collective_report: it carries the verified quotes, the rejected claims, every proposed edit checked against the file as it is now (did the path exist, was the anchor really in it at those lines, what imports it), the conversation, disagreements nobody settled, and what the run did not check. Workers run on roles.worker (your host model via sampling by default, so no key), one model call per unit plus one for round two.",
     inputSchema: {
         mission: z.string().describe("What needs to be done or understood"),
         focus: z.string().optional(),
@@ -734,9 +800,10 @@ server.registerTool("collective_run", {
         workers: z.number().int().min(1).max(6).optional().describe("How many units may run at once; defaults to collective.maxWorkers"),
         peer: z.boolean().optional().describe("Round two: let the units read each other's verified findings and answer with evidence. Defaults to collective.peerRound; costs one extra model call per unit"),
         repair: z.boolean().optional().describe("The repair pass: a finding the citation gate rejected goes back to its unit ONCE with the server's reason and the line the quote really lives at, and the answer is re-gated the same way. Defaults to collective.repairRound; costs at most one extra call per unit that had a repairable rejection"),
+        conclusion: z.boolean().optional().describe("The conclusion repair pass: a sentence of the leader's closing paragraph that contradicts this mission's own record — a finding the gate deleted restated as fact, a thin-support quote stated as established, a claim its own author withdrew, or a file that is not in the repository — goes back to the leader ONCE, by number, with the record's words, and the rewrite is re-checked. Defaults to collective.conclusionRepair; costs one extra call"),
         skills: z.array(z.string()).optional().describe("Shortlist of your installed skills to offer the leader, by name; defaults to all of them"),
     },
-}, async ({ mission, focus, paths, units, workers, peer, repair, skills }) => {
+}, async ({ mission, focus, paths, units, workers, peer, repair, conclusion, skills }) => {
     try {
         const { config } = loadConfig();
         for (const role of ["leader", "worker"]) {
@@ -748,6 +815,7 @@ server.registerTool("collective_run", {
                 ...config.collective,
                 ...(peer === undefined ? {} : { peerRound: peer }),
                 ...(repair === undefined ? {} : { repairRound: repair }),
+                ...(conclusion === undefined ? {} : { conclusionRepair: conclusion }),
             };
             const r = await runMission(projectDir(), { codebase: config.codebase, collective, skills: config.skills }, { mission, focus, paths, units, workers, skills }, log);
             log(`dossier written to ${path.relative(projectDir(), r.file)}`);
@@ -771,7 +839,7 @@ server.registerTool("collective_run", {
 });
 server.registerTool("collective_report", {
     title: "Read a mission dossier",
-    description: "Without an id: lists the mission dossiers kept in .design-mcp/collective/. With an id: returns that dossier — a verdict counted from the gate's own results, what the collective concluded, the plan, every verified quote with its file and line, the quotes that are real but do not visibly back their claim, what the server rejected as unsupported, the repair pass and what it fixed or withdrew, conflicts between units, admitted unknowns, and what the run explicitly did not check.",
+    description: "Without an id: lists the mission dossiers kept in .design-mcp/collective/. With an id: returns that dossier — a verdict counted from the gate's own results, what the collective concluded, the plan, every verified quote with its file and line, the quotes that are real but do not visibly back their claim, what the server rejected as unsupported, the repair pass and what it fixed or withdrew, every edit the mission proposed with what the gate said about where it lands and what the edit repair pass settled, the closing paragraph checked sentence by sentence against the mission's own record and what the conclusion repair pass settled, conflicts between units, admitted unknowns, and what the run explicitly did not check.",
     inputSchema: { id: z.string().optional().describe("Mission id, e.g. m-abc123 (a prefix works too)") },
 }, async ({ id }) => {
     try {
@@ -1049,7 +1117,7 @@ server.registerPrompt("collective_mission", {
                     "2. Split, with one leader. `collective_plan` (or `collective_run` to have the server dispatch everything). The units must be independent, must own their own files, and must include a verifier whose only job is to falsify the rest.",
                     "3. Dispatch the workers in parallel. Each one gets its own `code_context` pack; no worker sees another's context.",
                     "4. Do not agree with a claim you cannot cite. Every worker claim goes through `code_verify_cites` before it becomes part of your conclusion. Rejected claims are deleted, not softened; a quote that is really there but does not visibly back its claim is labelled, and you read those lines yourself.",
-                    "5. Implement the smallest correct change, inside the module that already owns the behaviour, obeying this project's own rule files.",
+                    "5. Implement the smallest correct change, inside the module that already owns the behaviour, obeying this project's own rule files. Check where each edit lands first with `code_verify_edits`: a path that does not exist and an anchor that is not in the file are the cheapest defects to catch and the most expensive to ship.",
                     "6. Prove it. Run the project's own gates (the digest lists its test, build and lint commands). Report separately: what you verified by running, what you verified only by reading, and what you did not check at all. An unverified change is unfinished, and saying so is part of the work.",
                     "",
                     "=== THE CITATION CONTRACT (this is what makes the collective trustworthy) ===",

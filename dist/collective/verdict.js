@@ -39,13 +39,32 @@ export function missionVerdict(input) {
         thin: input.merged.thin.length,
         units: units.length,
         productive,
+        editsChecked: input.edits?.edits.length ?? 0,
+        editsBroken: input.edits?.broken ?? 0,
+        editsStale: input.edits?.staleLines ?? 0,
+        editsUnanchored: input.edits?.unanchored ?? 0,
+        editsRepaired: input.editRepair?.fixed ?? 0,
+        editsWithdrawnByAuthor: input.editRepair?.withdrawn ?? 0,
+        conclusionsFound: input.conclusionFound ?? 0,
+        conclusionsRewritten: input.conclusionRepair?.rewritten ?? 0,
+        conclusionsWithdrawn: input.conclusionRepair?.withdrawn ?? 0,
+        conclusionsStanding: input.conclusionStillStanding ?? 0,
         verifier,
     };
+    // An edit whose anchor is missing is a defect of the same order as a citation whose quote is missing:
+    // the run's own deliverable points somewhere that is not there. It stops a mission from grading STRONG,
+    // and it is counted separately so the reader can see which of the two failed. Stale line numbers do not
+    // downgrade on their own — the anchor is real — but they are named on their own line.
+    //
+    // A sentence of the closing paragraph that still contradicts this mission's own record is the same order
+    // of defect again, one level up: the reader-facing summary states something the run itself deleted, or
+    // names a file that does not exist. A rewritten sentence that no longer contradicts the record does not
+    // hold the grade down; one that still does, does.
     const grade = totals.verified === 0
         ? "nothing"
         : totals.verified < 2 || productive * 2 <= units.length
             ? "thin"
-            : totals.stillWrong === 0 && totals.thin === 0 && productive === units.length && input.closingRan
+            : totals.stillWrong === 0 && totals.thin === 0 && productive === units.length && totals.editsBroken === 0 && totals.conclusionsStanding === 0 && input.closingRan
                 ? "strong"
                 : "partial";
     const lines = [
@@ -57,7 +76,17 @@ export function missionVerdict(input) {
         verifier
             ? `- Falsification: ${verifier.handle} (${verifier.unit}) ${verifier.reported ? `reported, with ${verifier.evidence} verified counter-observation(s)` : "produced nothing usable, so nothing in this run tried to destroy the plan"}.`
             : "- Falsification: the plan had no verifier unit, so nothing in this run tried to destroy it.",
+        ...(totals.editsChecked
+            ? [
+                `- Proposed edits: ${totals.editsChecked} checked against the file as it is now — ${totals.editsBroken} cannot be applied as described (no such file, anchor not in the file, or a line range past the end)${totals.editsStale ? `, ${totals.editsStale} have a real anchor with stale line numbers` : ""}${totals.editsUnanchored ? `, ${totals.editsUnanchored} are anchored to nothing` : ""}.${totals.editsRepaired || totals.editsWithdrawnByAuthor ? ` One repair pass settled ${totals.editsRepaired} of them by re-placing the step and ${totals.editsWithdrawnByAuthor} by the author giving it up with a reason.` : ""}`,
+            ]
+            : []),
         `- Closing pass: ${input.closingRan ? "ran, over the verified findings only" : "did not run — the findings below are unmerged"}.`,
+        ...(totals.conclusionsFound
+            ? [
+                `- Closing paragraph: ${totals.conclusionsFound} sentence(s) asserted something this mission's own record contradicts (a deleted finding restated, a claim its own author withdrew, a THIN SUPPORT quote stated as established, or a file that is not in this repository).${totals.conclusionsRewritten || totals.conclusionsWithdrawn ? ` One repair pass settled ${totals.conclusionsRewritten} of them by rewriting the sentence and ${totals.conclusionsWithdrawn} by the leader giving it up with a reason.` : ""}${totals.conclusionsStanding ? ` ${totals.conclusionsStanding} still stand, which is why this run is not graded STRONG.` : ""}`,
+            ]
+            : []),
         `- Grade: ${grade.toUpperCase()} — a count of what survived the gate, not a judgement of the answer.`,
         "",
         "This is arithmetic over citations, not an assessment: a verified quote proves the file says that and nothing more, an unfalsified plan is not a right one, and this run did not execute the project's own gates.",
@@ -66,6 +95,6 @@ export function missionVerdict(input) {
         grade,
         totals,
         lines,
-        headline: `verdict ${grade.toUpperCase()} (${totals.verified} verified, ${totals.rejected} rejected${totals.repaired ? `, ${totals.repaired} repaired` : ""}, ${totals.productive}/${totals.units} units usable)`,
+        headline: `verdict ${grade.toUpperCase()} (${totals.verified} verified, ${totals.rejected} rejected${totals.repaired ? `, ${totals.repaired} repaired` : ""}, ${totals.productive}/${totals.units} units usable${totals.editsBroken ? `, ${totals.editsBroken} edit(s) that cannot be applied as described` : ""}${totals.conclusionsStanding ? `, ${totals.conclusionsStanding} sentence(s) in the closing paragraph the record contradicts` : ""})`,
     };
 }

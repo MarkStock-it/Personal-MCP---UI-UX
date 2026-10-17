@@ -52,9 +52,9 @@ export interface HelloResult {
 }
 
 /** The newest dossier's own header, so the greeting can say what the last mission actually was. */
-async function lastMissions(root: string, want: number): Promise<{ id: string; mission: string; head: string }[]> {
+async function lastMissions(root: string, want: number): Promise<{ id: string; mission: string; head: string; grade: string }[]> {
   const files = await listDossiers(root);
-  const out: { id: string; mission: string; head: string }[] = [];
+  const out: { id: string; mission: string; head: string; grade: string }[] = [];
   for (const f of files.slice(0, want)) {
     let text = "";
     try {
@@ -63,7 +63,10 @@ async function lastMissions(root: string, want: number): Promise<{ id: string; m
       continue;
     }
     const lines = text.split("\n");
-    out.push({ id: f.id, mission: lines[1]?.trim() || "(unreadable)", head: lines[3]?.trim() || "" });
+    // The verdict the mission counted for itself. Read, never recomputed: a greeting has no business
+    // grading a run it did not take part in.
+    const grade = text.match(/^- Grade: ([A-Z]+) —/m)?.[1] ?? "";
+    out.push({ id: f.id, mission: lines[1]?.trim() || "(unreadable)", head: lines[3]?.trim() || "", grade });
   }
   return out;
 }
@@ -124,7 +127,7 @@ export async function helloCollective(projectRoot: string, cfg: HelloConfig, opt
     "",
     "## Open work",
     ...(missions.length
-      ? missions.map((m) => `- ${m.id} — ${m.mission}\n    .design-mcp/collective/${m.id}.md${m.head ? ` · ${m.head}` : ""}`)
+      ? missions.map((m) => `- ${m.id} — ${m.mission}\n    .design-mcp/collective/${m.id}.md${m.grade ? ` · verdict ${m.grade}` : ""}${m.head ? ` · ${m.head}` : ""}`)
       : ["- No mission has been run here yet. Say what to attack and the first one starts from the files."]),
     "",
     "## Your skills",
@@ -136,7 +139,9 @@ export async function helloCollective(projectRoot: string, cfg: HelloConfig, opt
     "1. `code_context { query }` for the exact area before touching it — the digest below is a map, not the source.",
     "2. `collective_run { mission }` when the work splits into independent questions; `collective_plan` when you only want the split. Either way the server re-reads every quote a worker makes and deletes what it cannot find.",
     "3. `code_verify_cites` on anything you are about to tell the owner as a fact.",
-    "4. Implement the smallest correct change, then run this project's own gates and report what you verified by running, what only by reading, and what you did not check.",
+    "4. `code_verify_edits` on the edits before you make them: every path must exist and every anchor must really be in the file at the lines it cites, and it tells you what imports the file you are about to change. An edit anchored to something that is not there is a guess, not a plan.",
+    "5. `code_refs { name }` before a rename, a signature change or a deletion: it names every place the name is declared and used, so \"this file imports that one\" is not mistaken for \"this code calls that function\".",
+    "6. Implement the smallest correct change, then run this project's own gates and report what you verified by running, what only by reading, and what you did not check.",
     "",
     `## Digest — this repo in ~${digestTokens} tokens (computed from the files, not written by a model)`,
     digest,

@@ -10,14 +10,17 @@
  *
  * So this memory is deliberately narrow:
  *   - only two kinds of model-written entry get in: a claim whose quote the server itself re-read (and
- *     only from a mission that actually closed), and a claim the server *rejected*, kept so nobody
- *     repeats it;
+ *     only from a mission that actually closed, and only when that quote visibly bears on the claim —
+ *     thin support is kept out, because memory is read back as if it were settled), and a claim the
+ *     server *rejected*, kept so nobody repeats it;
  *   - `ruling` entries are the owner's words only, never generated;
  *   - every entry carries its provenance: mission, path, lines, exact quote;
  *   - on load, every entry is re-checked against the current file. If the code it quotes is gone, it is
  *     marked stale, kept out of prompts and reported, because a memory that cannot go stale is a memory
  *     that will confidently lie;
- *   - entries are hints, never instructions. Nothing here can turn into a command the agents obey.
+ *   - entries are hints, never instructions. Nothing here can turn into a command the agents obey;
+ *   - a rejection the repair pass re-cited correctly is not filed: the code was never misdescribed, so it
+ *     is not added to the list of things nobody should say again.
  */
 import crypto from "node:crypto";
 import fs from "node:fs/promises";
@@ -112,6 +115,8 @@ export interface AdmissionInput {
   /** A mission that could not close a conclusion has not established anything. */
   closingRan: boolean;
   conflictPaths: string[];
+  /** `unit|claim` of findings the repair pass re-cited correctly: those were citation errors, not false beliefs. */
+  settled?: string[];
   cap: number;
   perMission: number;
 }
@@ -130,9 +135,16 @@ export async function admitFromMission(input: AdmissionInput): Promise<{ added: 
   const now = new Date().toISOString();
   const conflicted = new Set(input.conflictPaths);
 
+  const settled = new Set(input.settled ?? []);
+  // A verified quote that does not visibly back its claim is not admitted. The quote is real, so the gate
+  // passed it, but memory is read by the next mission as if it were settled — and unsupported statements
+  // presented as supported are exactly what an audit of generative search engines found in half of the
+  // sentences it checked (Liu, Zhang & Liang, https://arxiv.org/html/2304.09848v2). It stays in the
+  // dossier, labelled, where a reader can see it.
+  const thin = input.closingRan ? input.verification.claims.filter((c) => c.status === "verified" && c.support === "thin").length : 0;
   const candidates = input.closingRan
     ? input.verification.claims
-        .filter((c) => c.status === "verified" && c.lines && !conflicted.has(c.path))
+        .filter((c) => c.status === "verified" && c.lines && !conflicted.has(c.path) && c.support !== "thin")
         // A quote confirmed by two independent units is the strongest thing a mission can produce.
         .sort((a, b) => input.verification.claims.filter((x) => x.path === b.path && x.quote === b.quote).length - input.verification.claims.filter((x) => x.path === a.path && x.quote === a.quote).length)
         .slice(0, input.perMission)
@@ -152,12 +164,20 @@ export async function admitFromMission(input: AdmissionInput): Promise<{ added: 
     added.push(item);
   }
   if (!input.closingRan) skipped.push("this mission did not reach a conclusion, so nothing was recorded as established");
+  if (thin) skipped.push(`${thin} verified claim(s) were kept out of memory: the quote is real but shares no wording with the claim, so nobody should read it back as settled`);
+  let settledSkips = 0;
 
   // Rejections are worth keeping even from a failed mission: they are the cheapest lesson available,
   // and they are the ones a fresh worker is most likely to invent again. `found-elsewhere` is excluded —
   // that quote is real, only the line numbers were wrong, so it is a citation error, not a false belief.
   for (const c of input.verification.rejected) {
     if (c.status !== "quote-not-found" && c.status !== "file-missing") continue;
+    // The repair pass re-cited this one correctly: the code was never misdescribed, so it is not filed
+    // among the things nobody should say again.
+    if (settled.has(`${c.unit}|${c.claim}`)) {
+      settledSkips++;
+      continue;
+    }
     const id = idFor("rejected", c.path, c.quote);
     const prior = byId.get(id);
     if (prior) {
@@ -170,6 +190,8 @@ export async function admitFromMission(input: AdmissionInput): Promise<{ added: 
     byId.set(id, item);
     added.push(item);
   }
+
+  if (settledSkips) skipped.push(`${settledSkips} rejection(s) were re-cited correctly by the repair pass, so they were not recorded as things not to say`);
 
   await writeAll(input.root, prune([...byId.values()], input.cap));
   return { added, reinforced, skipped };

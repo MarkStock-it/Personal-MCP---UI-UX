@@ -60,7 +60,7 @@ const STOPWORDS = new Set([
     "code", "file", "files", "function", "functions", "line", "lines", "value", "values", "type", "types", "used", "uses", "using",
 ]);
 /** Content words of a claim or a quote: identifiers and prose, minus the words that mean nothing here. */
-function contentWords(text) {
+export function contentWords(text) {
     return normalise(text)
         .toLowerCase()
         .split(/[^a-z0-9_$]+/)
@@ -68,7 +68,7 @@ function contentWords(text) {
         .filter((w) => w.length >= 4 && !STOPWORDS.has(w));
 }
 /** Cheap stemming: a five-character prefix, so "exported"/"export" and "normalise"/"normalises" meet. */
-function shareStem(a, b) {
+export function shareStem(a, b) {
     const n = Math.min(5, a.length, b.length);
     return n >= 4 && a.slice(0, n) === b.slice(0, n);
 }
@@ -239,7 +239,7 @@ export function mergeVerification(base, extra) {
     };
 }
 /** Approximate line where a normalised quote sits, by matching its first words against each line. */
-function locate(text, q) {
+export function locate(text, q) {
     const lines = text.split("\n");
     const needle = head(q, 40);
     if (!needle)
@@ -254,7 +254,7 @@ function locate(text, q) {
     }
     return undefined;
 }
-function nearestLine(text, q) {
+export function nearestLine(text, q) {
     const words = new Set(q.split(" ").filter((w) => w.length > 3));
     if (!words.size)
         return null;

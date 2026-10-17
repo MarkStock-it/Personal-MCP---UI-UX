@@ -62,7 +62,7 @@ const FIXTURE = {
     "",
     "export const viaAlias = (raw: string) => normalise(raw);",
   ].join("\n"),
-  "notes.md": "# Fixture notes\n\nThe fixture exists so the index has something real to read.\n",
+  "notes.md": "# Fixture notes\n\nThe fixture exists so the index has something real to read. normalise() is the only cleaner in it.\n",
   // A skill the owner installed, in the project-local root the defaults look in. The smoke suite proves it
   // is discovered, readable, and that its text really lands in a worker's prompt when a unit is assigned it.
   ".claude/skills/make-it-fast/SKILL.md": [
@@ -89,6 +89,17 @@ const INVENTED_QUOTE = "const cache = new Map<string, string>();";
 // Armed only for the second mission, so the first one stays a clean run.
 const THIN_CLAIM = "the retry budget aborts after three attempts and the queue drains on shutdown";
 let thinArmed = false;
+// The closing paragraph with two sentences that contradict the mission's own record: one asserts the finding
+// the gate deleted as a fact, one names a file that is not in the repository. Armed only for the two missions
+// that exist to exercise the conclusion gate, so the first two stay clean runs.
+let closingArmed = false;
+// The conclusion repair answers by number, one sentence each way: the first is rewritten into wording that
+// restates the rejection instead of asserting it, the second is given up with a reason.
+const conclusionRepairAnswer = () => ({
+  note: "rewrote the first against the record and gave the second up",
+  fixed: [{ fixes: 1, text: "The claim that truncate() slices its input to a fixed limit was rejected by the server and is carried as unverified." }],
+  dropped: [{ fixes: 2, why: "the file list has no src/cleaner-core.ts, so I cannot say where the rewrite lives" }],
+});
 // Every prompt the server sent, so the suite can prove what actually reached the models.
 const seenPrompts = [];
 const peerResponse = (unit) => ({
@@ -117,7 +128,21 @@ const workerReport = (unit) => ({
     { claim: "truncate() slices its input to a fixed limit", path: "src/util.ts", lines: [8, 8], quote: INVENTED_QUOTE, confidence: "low" },
     ...(thinArmed && unit === "ghost" ? [{ claim: THIN_CLAIM, path: "src/util.ts", lines: [5, 5], quote: FIXTURE["src/util.ts"].split("\n")[4], confidence: "medium" }] : []),
   ],
-  steps: [],
+  // The work each unit proposes, so the edit gate has something real to check: one anchored edit, one
+  // anchor that occurs three times with no line range to disambiguate it, one real anchor cited at stale
+  // lines, and one edit in the file the leader invented.
+  steps:
+    unit === "explore-util"
+      ? [
+          { path: "src/util.ts", intent: "Reuse the exported cleaner instead of adding a second one", anchor: "export function normalise", lines: [1, 1], risk: "low" },
+          { path: "src/util.ts", intent: "Tidy the shared limit constant", anchor: "export", risk: "medium" },
+        ]
+      : unit === "verify-util"
+        ? [
+            { path: "src/leaky.ts", intent: "Route this file through the one cleaner", anchor: "import { normalise } from", lines: [3, 3], risk: "medium" },
+            { path: "src/leaky.ts", intent: "Rename the cleaner from the call site that uses it", anchor: "normalise", lines: [3, 3], risk: "low" },
+          ]
+        : [{ path: "src/does-not-exist.ts", intent: "Put the new cleaner in the file the leader invented", anchor: "export const cleaner", lines: [1, 1], risk: "high" }],
   unknowns: ["whether callers depend on the exact casing"],
   openQuestions: [],
   verdict: "ok",
@@ -159,6 +184,26 @@ client.setRequestHandler(CreateMessageRequestSchema, async (req) => {
   seenPrompts.push(prompt);
   const unit = prompt.match(/YOUR UNIT: ([a-z0-9-]+)/);
   // Round two and the repair pass both carry the same "YOUR UNIT:" line, so they are recognised first.
+  // The edit repair pass comes first because it is the more specific call: both repair prompts say "REPAIR
+  // PASS", and a host that answered the wrong one would fail the schema rather than the intent. Answered
+  // three different ways for the same reason the citation repair is: the outcomes are not the same thing.
+  // One source re-places its step against a real line, one withdraws it and says why, and one returns a step
+  // that still does not land — which the gate must catch again.
+  if (/AN EDIT THAT COULD NOT BE PLACED/.test(prompt)) {
+    const who = prompt.match(/AN EDIT THAT COULD NOT BE PLACED — ([a-z0-9-]+|the closing plan)/)?.[1] ?? "";
+    return answer(
+      JSON.stringify(
+        who === "explore-util"
+          ? { note: "re-placed against the limit constant, which is really in the file", steps: [{ fixes: 1, path: "src/util.ts", intent: "Tidy the shared limit constant", anchor: "export const LIMIT", lines: [5, 5], risk: "medium" }], dropped: [] }
+          : who === "verify-util"
+            ? { note: "I cannot place this one honestly", steps: [], dropped: [{ fixes: 1, why: "the file I was given has no such import line; I would need the file that writes it" }] }
+            : { note: "moved it to the caller", steps: [{ fixes: 1, path: "src/alias-user.ts", intent: "Put the cleaner in the caller instead", anchor: "export function viaAlias", lines: [1, 1], risk: "high" }], dropped: [] }
+      )
+    );
+  }
+  // The conclusion repair addresses the leader, not a unit, and its marker is its own: it is answered first
+  // so a host cannot mistake it for a closing pass or for one of the other two repairs.
+  if (/A CONCLUSION THE RECORD CONTRADICTS/.test(prompt)) return answer(JSON.stringify(conclusionRepairAnswer()));
   if (/REPAIR PASS/.test(prompt)) return answer(JSON.stringify(repairAnswer(unit?.[1] ?? "explore-util")));
   if (/now reading what the other copies of yourself found/.test(prompt)) return answer(JSON.stringify(peerResponse(unit?.[1] ?? "explore-util")));
   if (unit) return answer(JSON.stringify(workerReport(unit[1])));
@@ -180,8 +225,10 @@ client.setRequestHandler(CreateMessageRequestSchema, async (req) => {
   if (/closing the mission/.test(prompt)) {
     return answer(
       JSON.stringify({
-        answer: "One exported cleaner exists (src/util.ts). The claim about truncate()'s limit was rejected by the server and is carried as unverified.",
-        plan: [{ step: "Route new cleaning through the existing export", path: "src/util.ts", intent: "Reuse normalise() instead of adding a second cleaner", risk: "low" }],
+        answer: closingArmed
+          ? "The leak is fixed, because truncate() slices its input to a fixed limit. The rewrite is already in src/cleaner-core.ts. The claim about the limit was rejected by the server and is carried as unverified."
+          : "One exported cleaner exists (src/util.ts). The claim about truncate()'s limit was rejected by the server and is carried as unverified.",
+        plan: [{ step: "Route new cleaning through the existing export", path: "src/util.ts", intent: "Reuse normalise() instead of adding a second cleaner", anchor: "export function normalise", lines: [1, 1], risk: "low" }],
         risks: [],
         unverified: ["whether truncate() slices to the limit it is written against"],
         firstAction: "Read src/util.ts around the exported function before editing.",
@@ -207,7 +254,7 @@ try {
     // design playbook (offline knowledge + deterministic checks)
     "antislop_check", "critique_rubric", "design_playbook", "motion_pattern", "palette_check", "playbook_topics",
     // the codebase layer (ground truth, no model) and the collective
-    "code_index", "code_digest", "code_context", "code_verify_cites", "collective_plan", "collective_run", "collective_report", "collective_memory",
+    "code_index", "code_digest", "code_context", "code_refs", "code_verify_cites", "code_verify_edits", "collective_plan", "collective_run", "collective_report", "collective_memory",
     // waking the collective, and the owner's own skills
     "collective_hello", "collective_install", "skills_list", "skills_read",
   ];
@@ -411,6 +458,46 @@ try {
   const allGood = await call("code_verify_cites", { claims: [{ path: "src/util.ts", lines: [5, 5], quote: "export const LIMIT = 40;" }] });
   check("a fully verified set says so", !allGood.error && /Every claim checked out/.test(allGood.text), allGood.text.slice(0, 160));
 
+  console.log("== the edit gate (where a change lands, checked before anyone makes it) ==");
+  const editCheck = await call("code_verify_edits", {
+    edits: [
+      { path: "src/util.ts", anchor: "export function truncate", lines: [7, 8], intent: "reuse the existing slicer" },
+      { path: "src/leaky.js", anchor: "normalise", intent: "a path with the wrong extension" },
+      { path: "src/leaky.ts", anchor: "normalise", lines: [3, 3], intent: "rename the cleaner" },
+      { path: "src/util.ts", anchor: "LIMIT", intent: "an anchor with no line range to pin it down" },
+      { path: "../../etc/hosts", anchor: "localhost", intent: "an edit outside the project" },
+    ],
+  });
+  check(
+    "the edit gate answers where each edit lands, against the file as it is now",
+    !editCheck.error && /5 edit\(s\) checked/.test(editCheck.text) && /2 anchored, 1 anchor-ambiguous, 1 no-such-file, 1 outside-project/.test(editCheck.text),
+    editCheck.text.slice(0, 400)
+  );
+  check("a path that does not exist gets a suggestion from the index", !editCheck.error && /the closest path in the index is src\/leaky\.ts/.test(editCheck.text), editCheck.text.slice(0, 900));
+  check("an anchor used but not declared here points at the declaration and what a rename would sweep", !editCheck.error && /is declared in src\/util\.ts:1, so this edit sits at a use site and a rename would have to sweep 2 importer/.test(editCheck.text), editCheck.text.slice(0, 1400));
+  check("an anchor that occurs twice with no line range is not treated as placed", !editCheck.error && /occurs 2 times in this file/.test(editCheck.text) && /— anchor-ambiguous/.test(editCheck.text));
+  check("it refuses to read outside the project, and says so", !editCheck.error && /refused: nothing outside the project is checked/.test(editCheck.text));
+  check("it records the snapshot each line number belongs to", !editCheck.error && /sha256 [0-9a-f]{16} when this was checked/.test(editCheck.text));
+  check("the impact line comes from the index's edges, not from the intent's wording", !editCheck.error && /impact: 2 indexed file\(s\) import this one/.test(editCheck.text));
+  check("it says plainly that it does not apply the change or judge it", !editCheck.error && /It does not apply the change, it does not parse the result/.test(editCheck.text) && /the honest move is to re-check rather than to guess/.test(editCheck.text));
+  check("every status explains itself", !editCheck.error && /anchored: the file exists and the anchor/.test(editCheck.text) && /anchor-ambiguous: the anchor text appears several times/.test(editCheck.text));
+  check("an edit that cannot be applied is named as one, not softened", !editCheck.error && /Do not apply the edits above that cannot be applied as described/.test(editCheck.text));
+
+  console.log("== references (who declares a name, and who uses it) ==");
+  const refs = await call("code_refs", { name: "normalise" });
+  check("it separates the declaration from the uses", !refs.error && /1 declaration\(s\), 5 use\(s\) quoted across 4 file\(s\)/.test(refs.text), refs.text.slice(0, 400));
+  check("a mention in a document is labelled as a mention, not counted as a call", !refs.error && /notes\.md \(prose file: a mention, not a call/.test(refs.text), refs.text.slice(0, 1600));
+  check("the declaration carries its file, line, kind and export status", !refs.error && /src\/util\.ts:1 — exported function/.test(refs.text), refs.text.slice(0, 600));
+  check("every use is quoted with its own line number", !refs.error && /- src\/leaky\.ts\n\s+1: import \{ normalise \} from/.test(refs.text) && /3: export const clean = \(raw: string\) => normalise\(raw\);/.test(refs.text), refs.text.slice(0, 1200));
+  check("a use reached through a tsconfig alias is found too", !refs.error && /src\/alias-user\.ts/.test(refs.text));
+  check("the scan admits it is text, not a type checker", !refs.error && /Text scan, not a type checker/.test(refs.text) && /reached dynamically is invisible/.test(refs.text));
+  const refsScoped = await call("code_refs", { name: "normalise", paths: ["src/leaky.ts"] });
+  check("it can be aimed at one surface", !refsScoped.error && /2 use\(s\) quoted across 1 file\(s\)/.test(refsScoped.text) && /scanned the rename surface only/.test(refsScoped.text), refsScoped.text.slice(0, 400));
+  const refsNoDecl = await call("code_refs", { name: "trim" });
+  check("a name that is used but never declared says so instead of guessing at a definition", !refsNoDecl.error && /No indexed file declares/.test(refsNoDecl.text), refsNoDecl.text.slice(0, 500));
+  const refsMissing = await call("code_refs", { name: "zzzNeverHere" });
+  check("a name nothing mentions is reported as absent, not as an error", !refsMissing.error && /Nothing in the indexed files mentions/.test(refsMissing.text) && /does not exist in this project/.test(refsMissing.text), refsMissing.text.slice(0, 400));
+
   console.log("== path aliases (tsconfig `paths` are internal edges, not packages) ==");
   const ctxAlias = await call("code_context", { query: "viaAlias normalise" });
   const graph = await client.readResource({ uri: "code://graph" });
@@ -471,7 +558,43 @@ try {
   check("the conversation explains what the models are", /these are copies of one model/i.test(status));
 
   console.log("== the verdict, and the one repair pass (what the run counts, and what it fixed) ==");
-  check("the job result carries the verdict, so a poller sees it without opening the dossier", /verdict PARTIAL \(5 verified, 3 rejected, 2 repaired, 3\/3 units usable\)/.test(status), status.slice(0, 240));
+  check(
+    "the job result carries the verdict, so a poller sees it without opening the dossier",
+    /verdict PARTIAL \(5 verified, 3 rejected, 2 repaired, 3\/3 units usable, 2 edit\(s\) that cannot be applied as described\)/.test(status),
+    status.slice(0, 240)
+  );
+  check("the dossier checks the edits it proposes, before anyone applies them", /## The edits, checked before anyone applies them/.test(status) && /8 edit\(s\) checked/.test(status), status.slice(status.indexOf("## The edits"), status.indexOf("## The edits") + 500));
+  check("an edit at a call site names the other call sites, not just the file", /where it is used: src\/(alias-user|leaky)\.ts:\d+/.test(status), status.slice(status.indexOf("## The edits"), status.indexOf("## The edits") + 3000));
+  check(
+    "an invented file, a stale citation and an ambiguous anchor are told apart",
+    /- 2 cannot be applied as described, 0 have a real anchor with stale line numbers, 0 are anchored to nothing\./.test(status) && /### src\/does-not-exist\.ts — no-such-file/.test(status),
+    status.slice(status.indexOf("## The edits"), status.indexOf("## The edits") + 2500)
+  );
+  check(
+    "the summary counts only what is still true at the end, and says so",
+    /That counts only what is still true at the end: 1 of the steps above was re-placed by the repair pass, and 1 was given up by their own author with a reason; each is marked where it appears in this list/.test(status),
+    status.slice(status.indexOf("## The edits"), status.indexOf("## The edits") + 700)
+  );
+
+  console.log("== the edit repair pass (a step the gate could not place gets one second chance) ==");
+  check("the pass is reported, with what it settled", /## The edit repair pass \(one second chance for a step that could not be placed\)/.test(status) && /3 source\(s\) got their own unplaceable steps back/.test(status) && /1 step\(s\) came back placed, 1 withdrawn with a reason, 1 still not placeable/.test(status), status.slice(status.indexOf("## The edit repair"), status.indexOf("## The edit repair") + 700));
+  check("a re-placed step is marked as superseding the one that failed, and as coming from the pass", /superseded by the repair pass \(fixed\)/.test(status) && /came back from the repair pass/.test(status));
+  check("a source that gives a step up is recorded with its reason, not silently dropped", /verify-util withdrew: Route this file through the one cleaner — the file I was given has no such import line/.test(status), status.slice(status.indexOf("## The edit repair"), status.indexOf("## The edit repair") + 1400));
+  check(
+    "a returned step that still does not land is reported as still unplaceable, not accepted",
+    /1 still not placeable/.test(status) && /### src\/alias-user\.ts — anchor-not-found · from ghost \(architect\) · came back from the repair pass/.test(status),
+    status.slice(status.indexOf("### src/alias-user.ts"), status.indexOf("### src/alias-user.ts") + 300)
+  );
+  check("nothing that already landed is re-sent to the repair pass", seenPrompts.filter((p) => /AN EDIT THAT COULD NOT BE PLACED/.test(p)).every((p) => !/Reuse the exported cleaner instead of adding a second one/.test(p)), `edit-repair prompts: ${seenPrompts.filter((p) => /AN EDIT THAT COULD NOT BE PLACED/.test(p)).length}`);
+  check("the repair prompt carries the server's own reason and the number to answer", seenPrompts.some((p) => /AN EDIT THAT COULD NOT BE PLACED/.test(p) && /1\. \[anchor-ambiguous\]/.test(p) && /the anchor occurs 3 times in this file/.test(p)), `prompts captured: ${seenPrompts.length}`);
+  check("the repair prompt is told which of its steps already placed, so silence is not a rewrite order", seenPrompts.some((p) => /placed correctly and are NOT below/.test(p)));
+  check("the repair prompt forbids inventing a file to save a step", seenPrompts.some((p) => /Do not invent a file to save a step/.test(p)));
+  check("a real anchor cited at the wrong lines says where it really is", /the anchor is real but lives at line 1, not 3-3/.test(status));
+  check("an anchor that occurs three times is not treated as placed", /occurs 3 times in this file/.test(status) && /— anchor-ambiguous/.test(status));
+  check("the closing plan's own steps are gated and marked on the plan line", /\[edit gate: the anchor is in src\/util\.ts as cited, 2 file\(s\) import it\]/.test(status), status.slice(0, 1500));
+  check("the verdict counts the edits instead of letting them ride along", /- Proposed edits: 8 checked against the file as it is now — 2 cannot be applied as described/.test(status) && /One repair pass settled 1 of them by re-placing the step and 1 by the author giving it up with a reason/.test(status), status.slice(0, 1200));
+  check("and the job result says how the edit repair went", /edit repair: one pass, 3 model call\(s\)\. 1 step\(s\) that could not be placed came back placed and re-verified; 1 were withdrawn by their own author with a reason/.test(status), status.slice(status.indexOf("## Method and cost"), status.indexOf("## Method and cost") + 2500));
+  check("the edit gate states its own boundary in the dossier", /does not apply the change, does not parse the result, and cannot tell a correct change from a wrong one/.test(status));
   check("the dossier opens with the verdict, counted from the gate's results", /## Verdict \(counted from the gate's results, not written by a model\)/.test(status), status.slice(0, 500));
   check("the verdict's evidence count is the mission's own tally, not a second story", /- Evidence: 5 quote\(s\) re-read from the files and matched where they were cited/.test(status) && /verified 5 claim\(s\)/.test(status), status.slice(status.indexOf("## Verdict"), status.indexOf("## Verdict") + 900));
   check("the verdict separates a citation that is still wrong from one that was settled", /- Not evidence: 3 finding\(s\) the gate rejected; 1 still wrong at the end, 1 withdrawn by their own worker/.test(status), status.slice(0, 900));
@@ -635,6 +758,112 @@ try {
   check("the focus contract is about this repository only", focusText.includes("this repository only") && focusText.includes("the cleaning change"));
   check("the focus contract names the real commands and rule files", focusText.includes("notes.md") && /commands:/.test(focusText), focusText.slice(0, 300));
   check("the focus contract demands proof, not claims", /Prove it by running it/.test(focusText) && /code_verify_cites/.test(focusText));
+  check("it tells the assistant to check where an edit lands before making it", /check where it lands/.test(focusText) && /code_verify_edits/.test(focusText), focusText.slice(0, 2000));
+  console.log("== the edit repair pass can be switched off, and says so ==");
+  // A flag nobody has watched work is a claim, not a feature. The fixture's source has been changed under it
+  // by now (the memory test dropped a line), which is the honest way to see this: without the pass, a step that
+  // cannot be placed stays unplaceable and is reported as such. The closing paragraph is armed here too, so
+  // the same run shows what the conclusion gate does when nobody is allowed to repair it.
+  closingArmed = true;
+  await fs.writeFile(path.join(tmp, "design-mcp.config.json"), JSON.stringify({ collective: { editRepair: false, conclusionRepair: false } }, null, 2));
+  const run3 = await call("collective_run", { mission: "Check the cleaning path once more.", workers: 2 });
+  check("a mission starts with the pass switched off in the config", !run3.error && /Mission started \(job c-/.test(run3.text), run3.text.slice(0, 200));
+  let status3 = "";
+  for (let i = 0; i < 80; i++) {
+    const st = await call("design_status");
+    status3 = st.text;
+    if (/DONE|FAILED/.test(st.text)) break;
+    await new Promise((r) => setTimeout(r, 250));
+  }
+  await fs.rm(path.join(tmp, "design-mcp.config.json"), { force: true });
+  check("off means off, and the dossier says no pass ran", /DONE/.test(status3) && /edit repair: no pass ran \(every step that was checked could be placed, or `collective\.editRepair` is off\)/.test(status3), status3.slice(0, 300));
+  check("and an unplaceable step is still reported rather than quietly dropped", /## The edits, checked before anyone applies them/.test(status3) && /cannot be applied as described/.test(status3) && !/## The edit repair pass \(one second chance/.test(status3), status3.slice(status3.indexOf("## The edits"), status3.indexOf("## The edits") + 400));
+  check(
+    "the closing paragraph is checked against the record even when nobody may repair it",
+    /## The conclusion, checked against the mission's own record/.test(status3) && /2 sentence\(s\) contradict the record:/.test(status3) && /\[reintroduced-rejection: repeats a finding the gate deleted\] answer/.test(status3),
+    status3.slice(status3.indexOf("## The conclusion,"), status3.indexOf("## The conclusion,") + 700)
+  );
+  check("and the sentence that names a file which does not exist is told apart from it", /\[unknown-file: names a file that is not in this repository\] answer/.test(status3) && /no file of that name is in this repository/.test(status3), status3.slice(status3.indexOf("## The conclusion,"), status3.indexOf("## The conclusion,") + 1200));
+  check(
+    "with the pass off, both sentences still stand and the dossier says no pass ran",
+    /- conclusion: 2 sentence\(s\) of the closing paragraph contradicted this mission's own record/.test(status3) && /2 still contradict it at the end/.test(status3) && /- conclusion repair: no pass ran \(no sentence contradicted the record, or `collective\.conclusionRepair` is off\)/.test(status3) && !/## The conclusion repair pass/.test(status3),
+    status3.slice(status3.indexOf("## Method and cost"), status3.indexOf("## Method and cost") + 2400)
+  );
+  check(
+    "the verdict counts them, keeps the grade off STRONG, and the headline carries them",
+    /- Closing paragraph: 2 sentence\(s\) asserted something this mission's own record contradicts/.test(status3) && /2 still stand, which is why this run is not graded STRONG/.test(status3) && /2 sentence\(s\) in the closing paragraph the record contradicts/.test(status3),
+    status3.slice(0, 400)
+  );
+  check("and the paragraph itself is left exactly as the leader wrote it", /The leak is fixed, because truncate\(\) slices its input to a fixed limit\./.test(status3.slice(status3.indexOf("## What the collective concluded"), status3.indexOf("## First action"))));
+
+  console.log("== the conclusion repair pass (one second chance for a sentence the record contradicts) ==");
+  // Same mission, with the config file gone: both passes are back on, and this is the one that answers the
+  // closing paragraph. The stub rewrites the first sentence so it restates the rejection instead of asserting
+  // it, and gives the second up with a reason — the two honest outcomes, told apart by name.
+  await fs.rm(path.join(tmp, "design-mcp.config.json"), { force: true });
+  seenPrompts.length = 0;
+  const run4 = await call("collective_run", { mission: "Close the loop on the cleaning change.", workers: 2 });
+  check("a fourth mission starts with both passes on by default", !run4.error && /Mission started \(job c-/.test(run4.text), run4.text.slice(0, 200));
+  let status4 = "";
+  for (let i = 0; i < 80; i++) {
+    const st = await call("design_status");
+    status4 = st.text;
+    if (/DONE|FAILED/.test(st.text)) break;
+    await new Promise((r) => setTimeout(r, 250));
+  }
+  check("the dossier keeps the sentences that contradicted the record, with the reason for each", /2 sentence\(s\) contradict the record:/.test(status4) && /the record says: the mission's own gate rejected this finding \(quote-not-found\)/.test(status4), status4.slice(status4.indexOf("## The conclusion,"), status4.indexOf("## The conclusion,") + 900));
+  check(
+    "the pass reports one sentence rewritten and one given up, by number",
+    /## The conclusion repair pass \(one second chance for a sentence the record contradicts\)/.test(status4) && /2 flagged sentence\(s\) back/.test(status4) && /1 were rewritten without contradicting the record, 1 were given up with a reason, 0 left unaddressed/.test(status4),
+    status4.slice(status4.indexOf("## The conclusion repair"), status4.indexOf("## The conclusion repair") + 700)
+  );
+  check("the sentence the leader gave up is named with its reason, not silently dropped", /the leader gave up a sentence: "The rewrite is already in src\/cleaner-core\.ts\." — the file list has no src\/cleaner-core\.ts/.test(status4), status4.slice(status4.indexOf("## The conclusion repair"), status4.indexOf("## The conclusion repair") + 1200));
+  check(
+    "the conclusion the owner reads is the repaired one, and no longer asserts the deleted finding",
+    (() => {
+      const section = status4.slice(status4.indexOf("## What the collective concluded"), status4.indexOf("## First action"));
+      return /The claim that truncate\(\) slices its input to a fixed limit was rejected by the server and is carried as unverified\./.test(section) && !/The leak is fixed, because/.test(section) && !/cleaner-core/.test(section);
+    })(),
+    status4.slice(status4.indexOf("## What the collective concluded"), status4.indexOf("## What the collective concluded") + 600)
+  );
+  check("the pass says what the rewrite was checked against, so the wording is not a promise", /Every rewrite went back through the same check at the same standard/.test(status4));
+  check(
+    "the method lines say how the conclusion fared, and what is left of it",
+    /- conclusion: 2 sentence\(s\) of the closing paragraph contradicted this mission's own record/.test(status4) && /- conclusion repair: one pass, 1 model call\(s\)\. 1 sentence\(s\) were rewritten and re-checked against the record; 1 were given up by the leader with a reason/.test(status4),
+    status4.slice(status4.indexOf("## Method and cost"), status4.indexOf("## Method and cost") + 2600)
+  );
+  check(
+    "the verdict counts the settled sentences without treating them as a judgement",
+    /- Closing paragraph: 2 sentence\(s\) asserted something this mission's own record contradicts/.test(status4) && /One repair pass settled 1 of them by rewriting the sentence and 1 by the leader giving it up with a reason/.test(status4) && !/still stand, which is why/.test(status4),
+    status4.slice(0, 500)
+  );
+  check(
+    "a settled sentence no longer rides in the headline a poller reads",
+    (() => {
+      const header = status4.split("\n").find((l) => /^verdict /.test(l)) ?? "";
+      return header.length > 0 && !/closing paragraph the record contradicts/.test(header);
+    })(),
+    status4.split("\n").find((l) => /^verdict /.test(l)) ?? "(no headline)"
+  );
+  check(
+    "the repair prompt carries the record's own words and the number of each sentence",
+    seenPrompts.some((p) => /A CONCLUSION THE RECORD CONTRADICTS/.test(p) && /1\. \[reintroduced-rejection\] answer — you wrote: "The leak is fixed/.test(p) && /the record says: the mission's own gate rejected this finding \(quote-not-found\)/.test(p) && /2\. \[unknown-file\] answer/.test(p)),
+    `prompts captured: ${seenPrompts.length}; conclusion: ${seenPrompts.filter((p) => /A CONCLUSION THE RECORD CONTRADICTS/.test(p)).length}`
+  );
+  check(
+    "and it hands over the real file list, so a file that is not in it is a rule it can follow",
+    seenPrompts.some((p) => /A CONCLUSION THE RECORD CONTRADICTS/.test(p) && /=== THE FILES THIS REPOSITORY HAS/.test(p) && /\bsrc\/util\.ts\b/.test(p)),
+    seenPrompts.find((p) => /A CONCLUSION THE RECORD CONTRADICTS/.test(p))?.slice(-500) ?? "(no conclusion prompt)"
+  );
+  check(
+    "the prompt says the pass answers only what it was handed, and gives one move for each",
+    seenPrompts.some((p) => /A CONCLUSION THE RECORD CONTRADICTS/.test(p) && /Answer ONLY the numbered sentences below/.test(p) && /Do not rewrite the rest of the conclusion/.test(p) && /give it up with a reason/.test(p))
+  );
+  check(
+    "and the dossier says the same thing about what was not touched",
+    /Nothing else in the conclusion was touched/.test(status4) && /a repair answers the sentences it was handed, by number/.test(status4)
+  );
+
   const missionPrompt = await client.getPrompt({ name: "collective_mission", arguments: { mission: "ship the cleaning change" } });
   check("the mission prompt carries the whole protocol", /Run it as the collective/.test(missionPrompt.messages?.[0]?.content?.text ?? "") && /CITATION CONTRACT/.test(missionPrompt.messages[0].content.text));
 } finally {

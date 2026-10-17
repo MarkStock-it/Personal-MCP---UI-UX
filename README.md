@@ -29,7 +29,7 @@ The `image` role has no keyless option (sampling carries text, not image output)
 Handy for manual sessions: `DESIGN_MCP_PROJECT_DIR=/path/to/site node smoke/call.mjs <tool> '[json]'` calls one tool and prints the result.
 
 ## Test it
-No API keys needed: `npm run build && npm test` runs the stdio smoke suite (202 checks: tool/resource/prompt inventory, the playbook tools, config report, brief create/validate/never-overwrite, the codebase layer against a fixture repo including a tsconfig alias that must resolve to a real file, the collective's repair pass, its computed verdict, its round-two conversation and its memory — including one invented quote that must be rejected and then repaired, withdrawn or left unaddressed by three different units, an unevidenced rebuttal that must be marked unproven, a memory entry whose code changed and must retire itself, and the session-install block covering each host's own instruction file — one file per host family, the host's own text never touched, and a removal that cleans every file it wrote — and every graceful error path).
+No API keys needed: `npm run build && npm test` runs two harnesses — the stdio smoke suite (261 checks) and `smoke/arithmetic.mjs`, which drives the built modules directly (81 checks) — 342 in all: tool/resource/prompt inventory, the playbook tools, config report, brief create/validate/never-overwrite, the codebase layer against a fixture repo including a tsconfig alias that must resolve to a real file, the reference lookup (a declaration with its kind and export status, every use with its line, a use reached through a tsconfig alias, a name used but never declared, a name nothing mentions, a mention in a document labelled as a mention rather than a call), the edit gate against a fixture whose import graph is known (an anchor that is really there, one that is real but cited at stale lines, one that occurs three times, a line range past the end of the file, a path the leader invented, a path outside the project, an edit in a file the index skipped, the call sites named for an identifier anchor, and the snapshot hash each line number belongs to), the collective's repair pass, its computed verdict and the grade arithmetic behind it (a clean run grades `STRONG`, one edit that cannot be applied or one closing sentence that still contradicts the record stops that, and a claim the repair pass re-cited or withdrew no longer holds the run down), the conclusion gate turning an armed closing paragraph into two flagged sentences and the conclusion repair pass settling them one way each, its round-two conversation and its memory — including one invented quote that must be rejected and then repaired, withdrawn or left unaddressed by three different units, an unevidenced rebuttal that must be marked unproven, a memory entry whose code changed and must retire itself, and the session-install block covering each host's own instruction file — one file per host family, the host's own text never touched, and a removal that cleans every file it wrote — and every graceful error path).
 With keys, in Cursor chat: "run providers_config", then "run providers_test for each role", then "usage_report".
 Or: `npm run inspect`.
 
@@ -51,6 +51,13 @@ it is built on one rule: a claim about the code is only real if the server can r
   ranked by path, symbol name, doc text and one hop of the import graph (what the files depend on, and
   who would break), each slice carrying the file's own line numbers, plus every file considered and left
   out with the reason. An empty pack is an answer too: "not in the indexed codebase".
+- `code_refs { name }` answers what the import graph cannot: for one symbol, every place it is declared and
+every place it is used, with the file, line and text of each, declarations first and their kind and export
+status. Use it before a rename, a signature change or a deletion — a file that imports a module is not a
+file that calls the function, and a file that never imports it can still name it in a test title or a string.
+It is a word-boundary text scan, not a type checker, and it says so: a match inside a comment or a string
+counts, a same-named local counts, and a name reached dynamically is invisible. Deterministic, keyless, and
+complete over the indexed files, which is the right trade for a rename sweep and for a reader judging a diff.
 - `code_verify_cites` is the gate. Give it a path, a line range and the exact quote; it re-reads the file
   and answers `verified`, `found-elsewhere` (the quote is real, the line numbers are wrong),
   `quote-not-found`, `file-missing` or `outside-project` (refused, never read). No model is involved, so
@@ -64,6 +71,66 @@ it is built on one rule: a claim about the code is only real if the server can r
   passage really supports a claim takes a reader, and the audits say how badly that goes unanswered: 51.5%
   of generated sentences were fully supported by the citations attached to them and 25.5% of the citations
   did not support their sentence at all ([Liu, Zhang & Liang](https://arxiv.org/html/2304.09848v2)).
+
+### The edit gate (the same suspicion, pointed at the work instead of the claims)
+
+
+A finding whose quote is missing gets deleted. An edit whose anchor is missing used to travel straight into
+the project. `code_verify_edits` closes that gap: give it the edits you or a worker are about to make — a
+path, and where possible an anchor (a symbol, or the exact line the edit sits next to) and a line range — and
+it re-reads each file and answers where the edit lands: `anchored`, `anchor-elsewhere` (the anchor is real,
+the line numbers are stale), `anchor-ambiguous` (the anchor occurs more than once with no range to pin it
+down), `anchor-not-found`, `lines-out-of-range`, `no-such-file`, `outside-project`, or `unanchored` when
+there was nothing to check but the path. A path that is not there comes back with the closest path the index
+does have.
+
+It also answers the question a model is worst at, without asking one: what a change there can break. That is
+read off the index's own import graph — how many files import it, which of them are tests, and whether the
+anchor is declared in a *different* file, which means the edit sits at a use site and a rename would have to
+sweep that declaration's importers. When the anchor is a plain identifier, the same line names where it is
+actually used (the file and line of each call site on that surface), so a signature change can be judged
+rather than guessed at. Every checked edit carries the sha256 of the file exactly as it was read,
+so the line numbers are pinned to a snapshot: if the file hashes differently later, the numbers are stale and
+the honest move is to re-check rather than to guess.
+
+Every step a mission proposes goes through this gate, the closing plan's own steps included, and the verdict
+counts the ones that cannot be applied as described — one of those is enough to stop the run grading `STRONG`.
+What it does not do is apply the change, parse the result or judge the change: it says an edit lands where it
+claims to land, which is the half that can be checked without reading the code or trusting a model.
+
+### The edit repair pass (one second chance for a step that could not be placed)
+
+A step the gate rejects is not deleted and forgotten. It goes back to whoever proposed it — the unit that
+wrote it, or the leader for a step of the closing plan — carrying the server's own reason: the anchor is not
+in that file, it is really at line 263, it occurs three times so cite a range, the range is past the end of
+the file, the path is not in the index (with the closest one it does have). The source either re-places the
+step against real source it is given, or withdraws it with a reason ("the file does not contain the symbol
+this step assumes"), and what comes back is re-gated at exactly the same standard. Each returned step carries
+`fixes`, the number of the step it replaces, so the server matches answers to questions by arithmetic rather
+than by asking a model which is which. One pass, never a loop; nothing that already landed is ever re-sent;
+the first attempt stays in the record marked as superseded; and a withdrawn step is a recorded, respectable
+outcome rather than a silent deletion. Turn it off with `collective.editRepair: false`.
+
+### The conclusion repair pass (one second chance for a sentence the record contradicts)
+
+Every other output of a mission is gated, and the paragraph the owner actually reads was the last one that
+was not: a summary could assert a finding the gate had just deleted, in confident prose, three sections above
+the list saying it was rejected. `checkConclusion` closes that with the two things that can be decided without
+a reader. It splits the closing paragraph into sentences (deterministically, so a repair can answer by number)
+and asks of each one: does it assert a finding this mission deleted, or one its own author withdrew, or state
+a **thin-support** quote as established — and does it name a file that is in neither the index nor the
+repository? Two boundaries keep it honest: the `unverified` list is exempt, because that is where a rejected
+finding is *supposed* to be carried, and a hedged sentence is not an assertion — "the claim about the limit
+was rejected by the server and is carried as unverified" restates the record and is not flagged, while "the
+leak is fixed, because truncate() slices its input to a fixed limit" repeats the deleted finding and is.
+
+Flagged sentences go back to the leader that wrote them, once, numbered, with the record's own words and the
+repository's real file list — so "a file that is not in it" is a rule it can follow. It either rewrites a
+sentence so it says only what the record supports, or gives it up with a reason (kept and shown next to the
+sentence it removes). Then the *whole* paragraph is re-checked, not just the answers: a rewrite can put a new
+contradiction where the old one was, and that counts as one. Nothing else in the conclusion is touched, and
+a sentence that was already fine is never re-sent. One pass, never a loop — the same evidence as the other two
+repairs. Turn it off with `collective.conclusionRepair: false`; the check itself always runs.
 
 ### The collective (one leader, several copies of the model, quotes checked before anyone agrees)
 
@@ -83,18 +150,23 @@ it is built on one rule: a claim about the code is only real if the server can r
 5. The **leader closes** the mission using only the checked evidence, and must name what stays unverified.
    The dossier opens with a **verdict**: counts, not prose, computed from the gate's own results, with the
    one grade they support.
+6. Every **edit** the units and the closing plan propose is checked against the file as it is now — does the
+   path exist, is the anchor really in it at those lines, what imports it — before the owner ever reads it.
 
 Everything above ends in a **verdict you can check by hand**: how many quotes the server re-read, how many
 findings it rejected, how many of those are still wrong at the end, how many units produced anything usable,
-whether the verifier showed up, and whether the closing pass ran. `STRONG` needs no outstanding citation, no
-thin support and no silent unit; `THIN` means fewer than two verified quotes or more than half the units
-producing nothing; with no verified quote at all it is `NOTHING`. A model writes none of it, so the closing
-paragraph cannot talk the grade up.
+whether the verifier showed up, whether the closing pass ran, and whether any sentence of its paragraph still
+contradicts that record. `STRONG` needs no outstanding citation, no thin support, no silent unit, no edit that
+cannot be applied as described and no sentence of the conclusion the record contradicts; `THIN` means fewer than two
+verified quotes or more than half the units producing nothing; with no verified quote at all it is `NOTHING`.
+A model writes none of it, so the closing paragraph cannot talk the grade up.
 
 You get a dossier at `.design-mcp/collective/<id>.md` (job result and `collective_report`): the verdict,
-what was concluded, the plan, every verified quote with its file and line, the quotes that are real but do
-not visibly back their claim, everything rejected and why, the repair pass and what it fixed or withdrew,
-conflicts between units, admitted unknowns, the cost, and what the run explicitly did **not** check. `collective_plan`
+what was concluded, the plan, every edit the mission proposes with what the gate said about where it lands and
+what imports the file, every verified quote with its file and line, the quotes that are real but
+do not visibly back their claim, everything rejected and why, the repair pass and what it fixed or withdrew,
+the closing paragraph checked sentence by sentence against the mission's own record and what the conclusion
+repair pass settled, conflicts between units, admitted unknowns, the cost, and what the run explicitly did **not** check. `collective_plan`
 is the same leader pass on its own, when you would rather dispatch the workers yourself. The prompt
 `collective_mission` writes out the protocol; `focus_contract` is the ground-rules brief for working in
 this repository (also the resource `code://focus`).
@@ -103,7 +175,7 @@ Cost: one model call for the plan, one per unit, one for round two per unit, one
 to `roles.worker` = `session`, so the copies are instances of the model you are already talking to and no
 API key is needed. Set `roles.leader`/`roles.worker` to a provider to run the collective somewhere else.
 Caps live under `collective` (`maxUnits`, `maxWorkers`, `contextTokensPerWorker`, `synthesize`,
-`repairRound`, `peerRound`, `memory`, `memoryItems`, `memoryTokensInPrompt`, `keepDossiers`) and the codebase layer under
+`repairRound`, `editRepair`, `conclusionRepair`, `peerRound`, `memory`, `memoryItems`, `memoryTokensInPrompt`, `keepDossiers`) and the codebase layer under
 `codebase` (`roots`, `ignore`, `maxFiles`, `maxFileKB`, `digestTokens`, `contextTokens`).
 
 ### Who they are

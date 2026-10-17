@@ -117,6 +117,19 @@ export const ConfigSchema = z.object({
         // anything else. One pass, never a loop: a single targeted repair after a deterministic rejection
         // measurably beats resampling, repeated repairs do not, and debugging effectiveness decays fast.
         repairRound: z.boolean().default(true),
+        // The edit repair pass: a proposed step the edit gate could not place (the anchor is not in that file,
+        // the line range is past the end, the anchor occurs several times, the path is not in the index) goes
+        // back to the unit that proposed it ONCE, with the server's own reason, and the answer is re-gated at
+        // the same standard. Same evidence as `repairRound`: one targeted repair after a deterministic
+        // rejection pays, repeated repair decays, and a step its author withdraws is finished rather than
+        // guessed at again. Costs at most one extra call per unit that proposed an unplaced step.
+        editRepair: z.boolean().default(true),
+        // The conclusion repair pass: a sentence of the closing paragraph that contradicts this mission's own
+        // record — it asserts a finding the gate deleted, states a labelled THIN SUPPORT quote as established,
+        // or names a file that is not in this repository — goes back to the leader that wrote it ONCE, with the
+        // record's own words, and the rewrite is re-checked at the same standard. Same evidence as the other
+        // two repairs, and the same shape: one targeted pass after a deterministic finding pays, loops do not.
+        conclusionRepair: z.boolean().default(true),
         // What the collective remembers between missions. Only quote-verified claims and rejections get in.
         memory: z.boolean().default(true),
         memoryItems: z.number().int().min(10).max(400).default(60),
