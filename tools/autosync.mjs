@@ -89,8 +89,21 @@ function sync(reason) {
   }
   const dirty = changed();
   if (!dirty.length) {
+    // Nothing to commit is not the same as nothing to do: an earlier run may have committed while the
+    // push failed, and that commit is still only local.
+    const ahead = Number(git("rev-list", "--count", "@{u}..HEAD").out || "0");
+    if (ahead > 0) {
+      log(`${ahead} local commit(s) ahead of the remote — pushing`);
+      const p = git("push");
+      if (p.code !== 0) {
+        log(`push failed: ${p.err || p.out}`);
+        return "failed";
+      }
+      log("pushed");
+      return "ok";
+    }
     log("nothing to sync");
-    return false;
+    return "noop";
   }
 
   log(`${dirty.length} path(s) changed (${reason}) — building`);
@@ -98,7 +111,7 @@ function sync(reason) {
   if (!b.ok) {
     log(`STOPPED: ${b.why}`);
     log("the working tree is untouched; fix the error and save again");
-    return false;
+    return "failed";
   }
   log(b.why);
 
@@ -107,7 +120,7 @@ function sync(reason) {
     const g = gate();
     if (!g.ok) {
       log(`STOPPED: ${g.why} — nothing committed`);
-      return false;
+      return "failed";
     }
     log(g.why);
   } else {
@@ -120,7 +133,7 @@ function sync(reason) {
   const staged = git("diff", "--cached", "--name-only").out.split("\n").filter(Boolean);
   if (!staged.length) {
     log("nothing staged after the filter — no commit");
-    return false;
+    return "noop";
   }
 
   const message = [
@@ -133,7 +146,7 @@ function sync(reason) {
   const c = git("commit", "-m", message);
   if (c.code !== 0) {
     log(`commit failed: ${c.err || c.out}`);
-    return false;
+    return "failed";
   }
   log(`committed ${git("rev-parse", "--short", "HEAD").out}`);
 
@@ -141,19 +154,17 @@ function sync(reason) {
   if (p.code !== 0) {
     log(`committed but NOT pushed: ${p.err || p.out}`);
     log("the commit is safe locally; the next successful sync pushes it");
-    return true;
+    return "ok";
   }
   log("pushed");
-  return true;
+  return "ok";
 }
 
 if (once) {
-  const ok = sync("manual --once");
-  process.exit(ok ? 0 : 1);
+  process.exit(sync("manual --once") === "failed" ? 1 : 0);
 }
 
-// The watch set: source, checks, the scripts that run them, and the docs that describe them.
-const WATCH_DIRS = ["src", "smoke", "scripts", "tools"].map((d) => path.join(ROOT, d)).filter((d) => fs.existsSync(d));
+// The watch set: source, checks, the scripts that run them, and the docs that describe them.const WATCH_DIRS = ["src", "smoke", "scripts", "tools"].map((d) => path.join(ROOT, d)).filter((d) => fs.existsSync(d));
 const WATCH_FILES = ["AGENTS.md", "README.md", "package.json", "tsconfig.json", "design-mcp.config.json"].map((f) => path.join(ROOT, f)).filter((f) => fs.existsSync(f));
 
 let timer = null;
