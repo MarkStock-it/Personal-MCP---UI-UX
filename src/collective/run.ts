@@ -12,7 +12,7 @@
  */
 import fs from "node:fs/promises";
 import path from "node:path";
-import type { CodebaseConfig, CollectiveConfig, SkillsConfig } from "../config.js";
+import type { CodebaseConfig, CollectiveConfig, LocalConfig, SkillsConfig } from "../config.js";
 import { packContext, renderPack } from "../codebase/pack.js";
 import { estimateTokens, getIndex, renderDigest, type RepoIndex } from "../codebase/store.js";
 import { pLimit } from "../util/limit.js";
@@ -36,6 +36,10 @@ import { loadOwner, recordMission, renderOwnerStats } from "./owner.js";
 import { renderConversation, runPeerRound, type PeerRound } from "./peer.js";
 import { handleFor } from "./personas.js";
 import { discoverSkills, findSkill, readSkill, type Skill } from "../skills/index.js";
+import { LOCAL_ROUTING } from "./roles.js";
+import { delegateUnit, type DelegateDetail } from "../ollama/delegate.js";
+import { bumpCounters, effectiveLocal } from "../ollama/state.js";
+import { settingsFor } from "../ollama/client.js";
 import { repairableRejections, runRepairRound, type RepairRound } from "./repair.js";
 import { mergeEditChecks, proposedEdits, renderEditCheck, verifyEdits, type EditCheck } from "./edits.js";
 import { renderEditRepair, repairableEdits, runEditRepairRound, type EditRepairRound } from "./editrepair.js";
@@ -80,13 +84,15 @@ export interface MissionResult {
   memory: { added: MemoryItem[]; reinforced: number; stale: MemoryItem[]; live: number };
   /** The owner's skills that actually reached a worker's prompt, with the name, not just the wish. */
   skills: { name: string; unit: string; path: string; bytes: number }[];
-  stats: { workers: number; calls: number; verified: number; rejected: number; repaired: number; withdrawn: number; thin: number; repairCalls: number; contextTokens: number; digestTokens: number; cached: boolean; closingRan: boolean; peerCalls: number; grade: Verdict["grade"]; editsChecked: number; editsBroken: number; editsStale: number; editsPathless: number; editRepairCalls: number; editsFixed: number; editsWithdrawn: number; conclusionFound: number; conclusionRepairCalls: number; conclusionsRewritten: number; conclusionsWithdrawn: number; conclusionsStanding: number; ms: number };
+  /** The units the leader offered to the local model, and what happened to each of them. */
+  local: { unit: string; detail: DelegateDetail }[];
+  stats: { workers: number; calls: number; verified: number; rejected: number; repaired: number; withdrawn: number; thin: number; repairCalls: number; contextTokens: number; digestTokens: number; cached: boolean; closingRan: boolean; peerCalls: number; grade: Verdict["grade"]; editsChecked: number; editsBroken: number; editsStale: number; editsPathless: number; editRepairCalls: number; editsFixed: number; editsWithdrawn: number; conclusionFound: number; conclusionRepairCalls: number; conclusionsRewritten: number; conclusionsWithdrawn: number; conclusionsStanding: number; localDelegated: number; localApplied: number; localFallback: number; ms: number };
   warnings: string[];
 }
 
 export const missionsDir = (root: string) => path.join(root, ".design-mcp", "collective");
 
-export interface MissionConfig { codebase: CodebaseConfig; collective: CollectiveConfig; skills: SkillsConfig }
+export interface MissionConfig { codebase: CodebaseConfig; collective: CollectiveConfig; skills: SkillsConfig; local: LocalConfig }
 
 export async function runMission(projectRoot: string, cfg: MissionConfig, input: MissionInput, log: (m: string) => void): Promise<MissionResult> {
   const t0 = Date.now();
@@ -129,9 +135,14 @@ export async function runMission(projectRoot: string, cfg: MissionConfig, input:
   warnings.push(...scan.notes);
 
   const maxUnits = Math.min(cfg.collective.maxUnits, input.units ?? cfg.collective.maxUnits);
+  // Local mode, resolved once per mission: the runtime flip (local_mode) beats the config default.
+  const localEff = effectiveLocal(projectRoot, cfg.local);
+  const localSettings = settingsFor(cfg.local);
+  const localDetails: MissionResult["local"] = [];
+  if (localEff.on) log(`local mode is ON (${localEff.source === "runtime" ? "runtime flip" : "config default"}, model ${localEff.model}) — well-scoped implementer units may be delegated`);
   const planAsk = await askJson({
     role: "leader",
-    system: leaderSystem(maxUnits, skillIndex || undefined),
+    system: leaderSystem(maxUnits, skillIndex || undefined, localEff.on ? LOCAL_ROUTING : undefined),
     user: leaderUser({ mission: input.mission, digest, focus: input.focus, paths: input.paths, maxUnits, memory: memoryBlock, owner: ownerBlock }),
     schema: LeaderPlanSchema,
     maxTokens: 2200,
@@ -142,6 +153,8 @@ export async function runMission(projectRoot: string, cfg: MissionConfig, input:
   warnings.push(...planAsk.warnings.map((w) => `leader: ${w}`));
 
   const known = new Map(index.files.map((f) => [f.path, f]));
+  // Every name the index knows: one import the local model uses that is not in here is a mechanical reject.
+  const knownNames = new Set(index.files.flatMap((f) => f.symbols.map((s) => s.name)));
   const units = dedupeUnits(
     plan.units.slice(0, maxUnits).map((u) => {
       // The leader naming a file that does not exist is the cheapest hallucination to catch, so catch it here.
@@ -190,11 +203,39 @@ export async function runMission(projectRoot: string, cfg: MissionConfig, input:
         });
         contextTokens += pack.tokens;
         log(`  ${unit.id}: ${pack.slices.length} file(s), ~${pack.tokens} tokens packed in ${pack.ms} ms`);
+        if (unit.local && unit.role !== "implementer") {
+          warnings.push(`unit ${unit.id} was offered to the local model, but only implementer units are eligible — it runs on the council instead`);
+        }
+        // Local delegation. The mode is checked right here, not once at the start of the mission, so a flip
+        // during a run takes effect for every unit that has not started yet. Only applied outcomes end the
+        // unit; everything else falls through to the normal council path below, carrying the reason.
+        if (localEff.on && unit.local && unit.role === "implementer") {
+          const detail = await delegateUnit(unit, input.mission, index, knownNames, cfg.local, localSettings, log);
+          localDetails.push({ unit: unit.id, detail });
+          if (detail.outcome === "applied" || detail.outcome === "applied-with-retry") {
+            reports.push({
+              unit: unit.id,
+              answer: `This unit was DELEGATED TO THE LOCAL MODEL and its output is applied. The audit ladder ran in order: deterministic checks, then the import/API existence check, then the council spec review. ${detail.reason}`,
+              findings: [],
+              steps: [],
+              unknowns: [],
+              openQuestions: [],
+              verdict: "ok",
+            });
+            return;
+          }
+          // Everything else — UNKNOWN, audit failure after the one retry, timeout, mode switched off
+          // mid-flight — goes back to the council as a normal worker call, carrying the audit's reason.
+          warnings.push(`unit ${unit.id}: local delegation ${detail.outcome} — the council takes it over (${detail.reason.slice(0, 200)})`);
+        }
+        const takeoverNote = localDetails.find((l) => l.unit === unit.id && l.detail.outcome !== "applied" && l.detail.outcome !== "applied-with-retry")
+          ? `THE LOCAL MODEL TRIED THIS UNIT FIRST AND DID NOT PASS (${localDetails.find((l) => l.unit === unit.id)!.detail.reason.slice(0, 400)}). You are the council doing this unit properly from real source. Do not copy any of its code; the audit already deleted it.`
+          : undefined;
         try {
           const asked = await askJson({
             role: "worker",
             system: workerSystem(unit.role, assigned.get(unit.id)),
-            user: workerUser(unit, renderPack(pack), memoryBlock),
+            user: workerUser(unit, renderPack(pack), memoryBlock, takeoverNote),
             schema: WorkerReportSchema,
             maxTokens: 2600,
             attempts: 2,
@@ -407,8 +448,19 @@ export async function runMission(projectRoot: string, cfg: MissionConfig, input:
     conclusionsRewritten: conclusionRepair?.rewritten ?? 0,
     conclusionsWithdrawn: conclusionRepair?.withdrawn ?? 0,
     conclusionsStanding: (conclusionRepair ? conclusionRepair.remaining : conclusionIssues).length,
+    localDelegated: localDetails.length,
+    localApplied: localDetails.filter((l) => l.detail.outcome === "applied" || l.detail.outcome === "applied-with-retry").length,
+    localFallback: localDetails.filter((l) => l.detail.outcome !== "applied" && l.detail.outcome !== "applied-with-retry").length,
     ms: Date.now() - t0,
   };
+  // The owner's counters, once per mission. These are the numbers the status reads; nothing here is
+  // allowed to diffuse them (an audit rejection is an audit rejection).
+  bumpCounters(projectRoot, {
+    delegated: stats.localDelegated,
+    applied: stats.localApplied,
+    auditFailed: localDetails.filter((l) => l.detail.outcome === "rejected-and-taken-over").length,
+    fallback: stats.localFallback,
+  });
   const memoryState = { added: admitted, reinforced, stale: memory.stale, live: memory.live.length };
   const skillsUsed = units.flatMap((u) => {
     const a = assigned.get(u.id);
@@ -433,7 +485,7 @@ export async function runMission(projectRoot: string, cfg: MissionConfig, input:
   } catch (e) {
     warnings.push(`the owner record could not be written (${e instanceof Error ? e.message : String(e)})`);
   }
-  const dossier = renderDossier({ id, input, index, plan, units, reports, failed, verification, synthesis, conversation, repair, edits, editRepair, conclusion: conclusionIssues, conclusionRepair, verdict: finalVerdict, memory: memoryState, skills: skillsUsed, offered: offered.map((s) => s.name), stats, warnings });
+  const dossier = renderDossier({ id, input, index, plan, units, reports, failed, verification, synthesis, conversation, repair, edits, editRepair, conclusion: conclusionIssues, conclusionRepair, verdict: finalVerdict, memory: memoryState, skills: skillsUsed, local: localDetails, offered: offered.map((s) => s.name), stats, warnings });
   const dir = missionsDir(projectRoot);
   const file = path.join(dir, `${id}.md`);
   try {
@@ -444,7 +496,7 @@ export async function runMission(projectRoot: string, cfg: MissionConfig, input:
     warnings.push("the dossier could not be written to .design-mcp/collective/ (read-only project?)");
   }
 
-  return { id, file, dossier, plan, verification, synthesis, conversation, repair, edits, editRepair, conclusion: { issues: conclusionIssues, repair: conclusionRepair }, verdict: finalVerdict, memory: memoryState, skills: skillsUsed, stats, warnings };
+  return { id, file, dossier, plan, verification, synthesis, conversation, repair, edits, editRepair, conclusion: { issues: conclusionIssues, repair: conclusionRepair }, verdict: finalVerdict, memory: memoryState, skills: skillsUsed, local: localDetails, stats, warnings };
 }
 
 /** Unit ids must be unique and stable: the reports are matched back to the plan by id. */
@@ -530,6 +582,8 @@ export interface DossierInput {
   skills: MissionResult["skills"];
   /** Skill names the leader could see and assign, whether or not it used them. */
   offered: string[];
+  /** The units offered to the local model, with what the pipeline did to each. */
+  local: { unit: string; detail: DelegateDetail }[];
   stats: MissionResult["stats"];
   warnings: string[];
 }
@@ -555,6 +609,27 @@ export function renderDossier(d: DossierInput): string {
     `## First action\n${s.firstAction}`,
     ...(s.plan.length ? ["", "## Plan", ...s.plan.map((p, i) => `${i + 1}. ${p.step}${p.path ? ` — ${p.path}` : ""} (${p.risk} risk): ${p.intent}${planEditNote(d.edits, i)}`)] : []),
     ...(s.definitionOfDone.length ? ["", "## Definition of done", ...s.definitionOfDone.map((x) => `- ${x}`)] : []),
+    ...(d.local.length
+      ? [
+          "",
+          "## Local delegation (Ollama)",
+          ...d.local.map((l) => {
+            const files = l.detail.files.length ? ` files: ${l.detail.files.map((f) => `${f.path} (${f.status}, ${f.bytes} B)`).join(", ")}` : " (no files)";
+            return `- ${l.unit}: ${l.detail.outcome}${files} — ${l.detail.reason.replace(/\s+/g, " ").slice(0, 300)}`;
+          }),
+          ...d.local.flatMap((l) => l.detail.audit.map((a) => `    - ${l.unit} audit: ${a.replace(/\s+/g, " ").slice(0, 300)}`)),
+          ...d.local.flatMap((l) =>
+            l.detail.outputs.filter(Boolean).map((o, i) => `    - ${l.unit} attempt ${i + 1} (the raw local output is kept here, and it is not built on): ${o.replace(/\s+/g, " ").slice(0, 500)}`)
+          ),
+          "- Local output is untrusted by default: nothing merged without the audit ladder passing (deterministic checks, then import/API existence, then the council spec review), and every failure was reverted byte-for-byte from the snapshot taken before the write.",
+        ]
+      : []),
+    ...(stats.localDelegated
+      ? [
+          "",
+          `## Local delegation cost\n- Local delegation: ${stats.localDelegated} unit(s) offered to the local model — ${stats.localApplied} applied after audit, ${stats.localFallback} did not pass and went back to the council.`,
+        ]
+      : []),
     ...renderConclusionCheck(d.conclusion),
     ...(d.conclusionRepair ? renderConclusionRepair({ ...d.conclusionRepair.attempt, calls: d.conclusionRepair.calls }) : []),
     "",

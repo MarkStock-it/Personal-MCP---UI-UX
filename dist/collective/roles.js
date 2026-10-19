@@ -27,6 +27,8 @@ const UnitSchema = z.object({
     doneWhen: z.array(z.string().min(5)).max(6).default([]),
     /** A skill the owner installed, by name. Its full text is pasted into that unit's prompt, or dropped if the file cannot be read. */
     skill: z.string().max(80).optional(),
+    /** Offer this unit to the local model (only sane when local mode is on and the work is well-scoped implementer work). */
+    local: z.boolean().default(false),
 });
 export const LeaderPlanSchema = z.object({
     restated: z.string().min(20),
@@ -115,7 +117,19 @@ export const CITATION_CONTRACT = `CITATION CONTRACT (the server enforces this me
   lines you cite. A step whose anchor is not there is reported as an edit that cannot be applied, so put a
   real symbol or a real line in "anchor" — or leave the anchor out and say in "unknowns" that you could
   not place the edit. Where you cannot place it, say that rather than picking a line that looks close.`;
-export function leaderSystem(maxUnits, skills) {
+/**
+ * Local delegation, when it is on: the leader may offer a unit to the local model instead of a council
+ * copy. The routing rule is deliberately narrow and the default is "keep it" — the council stays in
+ * charge of quality, and a unit that might not scope cleanly is never delegated.
+ */
+export const LOCAL_ROUTING = `Alright, optional local delegation — the owner runs a small local coder model through Ollama, and you may mark eligible units "local": true (it stays false unless you set it).
+
+You MUST mark "local": true ONLY when ALL of these hold, or you keep the unit yourself (leave it false):
+- role "implementer" BYTE-EQUIVALENT work that is well-scoped: boilerplate, types/interfaces, utility functions, simple CRUD, unit tests, docs/comments, repetitive refactors;
+- the change touches FEW files, needs no broad repo understanding, and the definition of done is mechanical enough to check (it compiles, tests pass);
+- nothing security-sensitive, no architecture, no cross-file logic, no tricky debugging, no invented APIs.
+When in doubt keep it: an unsure unit stays with the council. Audit exists, but the cheapest failure is the one never delegated.`;
+export function leaderSystem(maxUnits, skills, localRouting) {
     return `${personaBlock(LEADER)}
 
 You are the LEADER of a collective: several copies of the same model, running in parallel, one mission.
@@ -131,7 +145,7 @@ How you split work:
 - Use 3-${maxUnits} units. Fewer, sharper units beat many thin ones.
 - "restated" must describe the mission in THIS repository's own names, taken from the digest. If the
   mission presumes something the digest does not show, put it in "unknowns" — do not assume it exists.
-
+${localRouting ? `\n${localRouting}\n` : ""}
 ${CITATION_CONTRACT}
 
 The seats available to your units — choose the seat each piece of work actually needs:
@@ -146,10 +160,9 @@ ${skills}` : ""}
 What each seat is for:
 ${WORKER_ROLES.map((r) => `- ${r} (${PERSONAS[r].handle}): ${ROLE_BRIEF[r]}`).join("\n")}
 
-Reply with a single JSON object, no prose:
-{"restated":"...","risks":["..."],"assumptions":["..."],"unknowns":["..."],
- "units":[{"id":"kebab-case","role":"explorer|architect|implementer|verifier|critic","objective":"...",
-           "scope":["path/relative/to/repo"],"mustAnswer":["..."],"doneWhen":["..."]}]}`;
+Reply with a single JSON object, no prose:{"restated":"...","risks":["..."],"assumptions":["..."],"unknowns":["..."],
+"units":[{"id":"kebab-case","role":"explorer|architect|implementer|verifier|critic","objective":"...",
+           "scope":["path/relative/to/repo"],"mustAnswer":["..."],"doneWhen":["..."],"local":false}]}`;
 }
 export function leaderUser(i) {
     return [
@@ -213,7 +226,7 @@ Reply with a single JSON object, no prose:
  "steps":[{"path":"...","intent":"...","anchor":"existing symbol or quoted line","lines":[1,1],"risk":"low|medium|high"}],
  "unknowns":["..."],"openQuestions":["..."],"verdict":"ok|risky|blocked"}`;
 }
-export function workerUser(unit, pack, memory) {
+export function workerUser(unit, pack, memory, takeoverNote) {
     return [
         `YOUR UNIT: ${unit.id} (${unit.role})`,
         `OBJECTIVE: ${unit.objective}`,
@@ -226,7 +239,9 @@ export function workerUser(unit, pack, memory) {
         pack,
         "",
         "=== END CONTEXT ===",
-        `Report now. "unit" must be exactly "${unit.id}".`,
+        takeoverNote
+            ? `\n${takeoverNote}\n\nReport now, from the real source, as if the local attempt never happened. "unit" must be exactly "${unit.id}".`
+            : `Report now. "unit" must be exactly "${unit.id}".`,
     ]
         .filter(Boolean)
         .join("\n");

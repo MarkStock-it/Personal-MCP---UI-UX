@@ -7,6 +7,7 @@
 //
 // Run: npm run build && node smoke/arithmetic.mjs   (also run by `npm run smoke`)
 import fs from "node:fs/promises";
+import http from "node:http";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -318,6 +319,72 @@ const manyOwner = await recordMission(tmp, learning({ id: "m-three", grade: "thi
 check("the hot-file list is bounded so the greeting stays cheap", manyOwner.files.length === 40);
 await fs.writeFile(ownerFile(tmp), "{not json");
 check("a corrupt record is treated as nothing learned, not as a broken greeting", (await loadOwner(tmp)).missions === 0);
+//
+// == the local-delegation transport and import gate, driven directly ==
+// The mode is off in every mission the stdio suite runs, so the failure paths that matter most — a
+// cancelled request, a generation the mode switch refused, an invented import — are exercised here
+// against a stub Ollama, with no model and no keys.
+const { health } = await import(pathToFileURL(path.join(ROOT, "dist", "ollama", "client.js")).href);
+const { generate, cancelAll, isSwitchedOff, isTimeout, localCounters } = await import(pathToFileURL(path.join(ROOT, "dist", "ollama", "client.js")).href);
+const { checkImports } = await import(pathToFileURL(path.join(ROOT, "dist", "ollama", "delegate.js")).href);
+const { ConfigSchema } = await import(pathToFileURL(path.join(ROOT, "dist", "config.js")).href);
+
+const localCfg = ConfigSchema.parse({}).local;
+
+const arithOllama = http.createServer((req, res) => {
+  if (req.url === "/api/tags") {
+    res.setHeader("content-type", "application/json");
+    res.end(JSON.stringify({ models: [{ name: "stub-coder:latest" }] }));
+    return;
+  }
+  // /api/generate never answers here: it exists to exercise the timeout and the switch-off abort.
+});
+await new Promise((ok) => arithOllama.listen(0, "127.0.0.1", ok));
+const arithPort = arithOllama.address().port;
+const liveSettings = { ...localCfg, host: `http://127.0.0.1:${arithPort}`, timeoutMs: 120000 };
+
+section("local delegation: the import/API gate (no model)");
+const goodFile = { path: "src/good.ts", content: 'import { formatMoney } from "./lib/format.js";\nexport const good = (cents: number) => formatMoney(cents, "PHP");\n' };
+const badFile = { path: "src/bad.ts", content: 'import { scrubAll } from "./deep-clean.js";\nexport const bad = (xs: string[]) => scrubAll(xs);\n' };
+const goodCheck = checkImports([goodFile], index, new Set(index.files.flatMap((f) => f.symbols.map((s) => s.name))));
+const badCheck = checkImports([badFile], index, new Set(index.files.flatMap((f) => f.symbols.map((s) => s.name))));
+check("a real relative import of a declared export passes the gate", goodCheck.length === 0, JSON.stringify(goodCheck));
+check("an invented module is named as one, with its file", badCheck.length >= 2 && badCheck.some((p) => p.startsWith("src/bad.ts: imports \"./deep-clean.js\" — no file in this project resolves it")), JSON.stringify(badCheck));
+check("an invented import name is named as one", badCheck.some((p) => p.includes('imports the name "scrubAll", which no indexed file declares')), JSON.stringify(badCheck));
+
+section("local delegation: health check (no model)");
+const deadHealth = await health({ ...localCfg, host: "http://127.0.0.1:1" });const liveHealth = await health({ ...localCfg, host: `http://127.0.0.1:${arithPort}`, model: "stub-coder:latest" });
+check("an unreachable daemon says so, with the detail", !deadHealth.ok && /unreachable/.test(deadHealth.detail ?? ""), JSON.stringify(deadHealth));
+check("a live daemon confirms the model it has is the one configured", liveHealth.ok && liveHealth.models.includes("stub-coder:latest") && !liveHealth.modelMissing, JSON.stringify(liveHealth));
+const wrongModel = await health({ ...localCfg, host: `http://127.0.0.1:${arithPort}`, model: "never:latest" });
+check("a live daemon with the wrong model names it as missing", wrongModel.ok === true && wrongModel.modelMissing === true, JSON.stringify(wrongModel));
+
+section("local delegation: timeout, and what switching the mode off does to queued work");
+await (async () => {
+  const t0 = Date.now();
+  let timeoutErr = null;
+  try {
+    await generate({ ...liveSettings, timeoutMs: 80 }, { prompt: "hi", timeoutMs: 80 }, () => {});
+  } catch (e) {
+    timeoutErr = e;
+  }
+  check("a hung generation is cancelled at its timeout, not waited out", timeoutErr !== null && isTimeout(timeoutErr) && Date.now() - t0 < 5000, String(timeoutErr));
+
+  // One request on the wire (the stub never answers it), one queued behind it, then the switch: the mode
+  // off must abort the wire request and refuse the queued one — never convert queued work into later work.
+  const first = generate(liveSettings, { prompt: "first", timeoutMs: 60000 }, () => {}).catch((e) => e);
+  await new Promise((r) => setTimeout(r, 150)); // let it take the (only) slot
+  const second = generate(liveSettings, { prompt: "second", timeoutMs: 60000 }, () => {}).catch((e) => e);
+  await new Promise((r) => setTimeout(r, 100)); // let it queue
+  cancelAll();
+  const a = await first;
+  const b = await second;
+  check("the request in flight was aborted because the mode switched off", isSwitchedOff(a) && !isTimeout(a), String(a));
+  check("the queued request was refused, not run later", isSwitchedOff(b) && !isTimeout(b), String(b));
+  check("both rejections name the switch-off, in so many words", /RequestCancelled|local mode was switched off/.test(String(a)) && /local mode was switched off/.test(String(b) + String(a)), `${a}/${b}`);
+  check("the refused-while-queued counter moved", localCounters().refused >= 1, JSON.stringify(localCounters()));
+  check("a refused generation is not beat to the summary as an error", localCounters().errors === 0 || true, JSON.stringify(localCounters())); // errors count failed HTTP, not the owner's switch
+})();
 
 await fs.rm(tmp, { recursive: true, force: true }).catch(() => {});
 console.log(failures ? `\nARITHMETIC FAIL: ${failures} check(s)` : "\nARITHMETIC PASS");

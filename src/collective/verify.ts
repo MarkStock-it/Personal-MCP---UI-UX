@@ -349,7 +349,7 @@ export async function verifyCallerClaims(
   projectRoot: string,
   claims: { claim?: string; path: string; lines?: [number, number]; quote: string; confidence?: "high" | "medium" | "low" }[]
 ): Promise<Verification> {
-  const units: Unit[] = [{ id: "caller", role: "explorer", objective: "claims supplied by the caller, checked against the files", scope: [], mustAnswer: ["is every quote where it says it is?"], doneWhen: [] }];
+  const units: Unit[] = [{ id: "caller", role: "explorer", objective: "claims supplied by the caller, checked against the files", scope: [], mustAnswer: ["is every quote where it says it is?"], doneWhen: [], local: false }];
   const reports: WorkerReport[] = [
     {
       unit: "caller",

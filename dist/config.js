@@ -138,6 +138,53 @@ export const ConfigSchema = z.object({
         keepDossiers: z.number().int().min(1).max(200).default(20),
     })
         .default({}),
+    // OPTIONAL local-model delegation through Ollama. The council stays in charge of quality: only units the
+    // leader marks eligible (well-scoped implementer work) are written by the local model, every write is
+    // snapshotted, audited and reverted on failure, and anything that fails twice falls back to the council.
+    // Default OFF: a config file with no `local` block changes nothing.
+    // A/B testing: point `model` at "qwen2.5-coder:14b" (note: ~9 GB, it will spill past 8 GB VRAM onto your
+    // CPU) or "qwen2.5-coder:7b" — per-request timing is recorded so the comparison is measurable.
+    // Ollama itself should run with OLLAMA_NUM_PARALLEL=1 and OLLAMA_MAX_LOADED_MODELS=1; those are the
+    // Ollama daemon's own env vars, set when it starts — they cannot be set from this server.
+    local: z
+        .object({
+        enabled: z.boolean().default(false),
+        // Where Ollama listens, as the config default (a runtime `local_mode` set wins when it differs).
+        host: z.string().default("http://127.0.0.1:11434"),
+        model: z.string().default("deepseek-coder-v2:latest"),
+        // Sent per request. num_ctx set explicitly: the default silently truncates prompts.
+        numCtx: z.number().int().min(2048).max(131072).default(8192),
+        temperature: z.number().min(0).max(2).default(0.1),
+        // 4-6 leaves CPU headroom for everything else the machine is doing.
+        numThread: z.number().int().min(1).max(64).default(5),
+        // Idle unload: frees VRAM. Sent as "Nm" per request.
+        keepAliveM: z.number().int().min(1).max(240).default(5),
+        maxOutputTokens: z.number().int().min(256).max(16384).default(4096),
+        // Hard cap of concurrent local requests and the per-request timeout. On timeout the request is
+        // cancelled and the council takes the unit over.
+        maxConcurrent: z.number().int().min(1).max(8).default(1),
+        timeoutSec: z.number().int().min(20).max(1800).default(120),
+        // Local output lands as full file contents. Writes are audited in place with these commands,
+        // auto-detected when left unset: tsc when a tsconfig.json exists, eslint when a lint config does,
+        // the package.json test script when it declares one.
+        maxFilesPerUnit: z.number().int().min(1).max(12).default(3),
+        audit: z
+            .object({
+            typecheckCmd: z.string().optional(),
+            lintCmd: z.string().optional(),
+            testCmd: z.string().optional(),
+            timeoutSec: z.number().int().min(30).max(3600).default(240),
+            // The audit reruns the project's existing tests. Skip only when they are far too slow to sit
+            // inside a delegation loop — and say so out loud, because then the audit is weaker.
+            skipExistingTests: z.boolean().default(false),
+        })
+            .default({}),
+        // Writes are byte-perfect reversible (current bytes are snapshotted first), but a revert can eat
+        // uncommitted work that was never ours. Delegation refuses to run into a dirty tree unless this is
+        // set (or the tree is not a git repo — then the config takes the responsibility explicitly).
+        allowDirty: z.boolean().default(false),
+    })
+        .default({}),
     test: z
         .object({
         // "chromium" = Playwright's bundled browser. "chrome"/"msedge" = the one already installed on your machine.

@@ -8,7 +8,7 @@ Node >= 20, TypeScript, ESM. `dist/` is committed because the host runs `dist/in
 ```bash
 npm install
 npm run build          # tsc -> dist/
-npm test               # 355-check keyless gate: smoke/smoke.mjs (263, stdio suite) + smoke/arithmetic.mjs (92, the built modules driven directly); no API keys needed
+npm test               # 394-check keyless gate: smoke/smoke.mjs (290, stdio suite) + smoke/arithmetic.mjs (104, the built modules driven directly); no API keys needed
 DESIGN_MCP_PROJECT_DIR=<dir> node smoke/call.mjs <tool> '[json]'   # call one tool
 npm run inspect        # MCP inspector
 npx tsx tools/lab/run.ts   # the memory experiment; see tools/lab/README.md (not a gate)
@@ -29,22 +29,23 @@ fixture SKILL.md that must be found, read, and pasted into exactly the worker th
 edit gate over the edits those missions proposed (an invented file, a real anchor cited at stale lines, an
 anchor that occurs three times, the snapshot hash, the closing plan's own steps), the session-block
 installer (idempotent, and it must not touch text outside its markers), and every graceful
-error path. `smoke/arithmetic.mjs` (55 checks) then drives the built edit gate, the built merge and the built verdict directly, because
+error path. `smoke/arithmetic.mjs` (104 checks) then drives the built edit gate, the built merge and the built verdict directly, because
 neither is reachable through a mission at reasonable cost: the full status matrix (anchored, stale,
 ambiguous, not found, out of range, missing, refused, unindexed, and the import-graph impact behind each)
 and every grade rule (a clean run is `STRONG`; one unapplicable edit, one wrong citation, one thin quote, one
 silent unit, no closing pass or one sentence of that paragraph that still contradicts the record are each
 enough to stop it, and a step that was re-placed by the edit repair pass or a sentence the conclusion pass
-rewrote to stand on the record stops counting). It must all pass — 355/355 (263 + 92) — before
+rewrote to stand on the record stops counting). It must all pass — 394/394 (290 + 104) — before
 any change is called done.
 
 ## Map
 - `src/index.ts` — the MCP surface: 15 generating/testing tools, 6 playbook tools, 10 codebase/collective
   tools (code_index, code_digest, code_context, code_refs, code_verify_cites, code_verify_edits, collective_plan, collective_run,
   collective_report, collective_memory), 4 session/skill tools (collective_hello, collective_install,
-  skills_list, skills_read), 11 `design://` + 7 `code://` resources, 5 prompts. Registered at
-  the bottom; the codebase and collective blocks are clearly marked. The smoke suite asserts these counts,
-  so adding a tool means updating it as well as this line.
+  skills_list, skills_read), 1 local-delegation tool (local_mode), 11 `design://` + 7 `code://`
+  resources, 5 prompts. Registered at the bottom; the codebase, collective and local_mode blocks are
+  clearly marked. The smoke suite asserts these counts, so adding a tool means updating it as well as
+  this line.
 - `src/codebase/` — ground truth about the repo, computed from the files, no model involved. `symbols.ts`
   extracts declarations and imports (**read the header before changing it**: line-oriented comment
   stripping and span rules exist because two real bugs came from getting them wrong), `scan.ts` lists and
@@ -90,6 +91,19 @@ distinct: rewritten-and-re-checked, or given up with a reason that is shown next
   `hello.ts` is the session greeting ("Hello collective.": one pass, no model,
   ~150 ms, and it must stay that cheap because it runs at the top of every session) and `install.ts` writes
   the marked block that tells a host to call it.
+- `src/ollama/` — optional local-model delegation through Ollama, everything OFF by default: `client.ts`
+  is transport only (a counting-semaphore queue capped by `local.maxConcurrent`, queue-time-inclusive
+  timeouts, a generation counter so `cancelAll` refuses queued work instead of running it later,
+  warn-once reporting, a health check), `state.ts` is the runtime toggle the flip persists under
+  `.design-mcp/local-mode.json` plus the owner's counters, and `delegate.ts` is the one write path:
+  the local model returns FULL file contents, the previous bytes are snapshotted, the write is audited
+  in the fixed order (deterministic checks: configured typecheck/lint/tests, then the mechanical
+  import/API-existence check against the index, then ONE council spec review), a failure reverts
+  byte-for-byte and feeds the concrete errors back ONCE, a second failure reverts and hands the unit
+  to the council with the reason. The gate checks that nothing was merged on the local model's word;
+  it does not check that the change is right — the council review and the project's own gates read
+  after the merge do that. Nothing here runs with local mode off: zero Ollama calls, identical mission
+  behaviour.
 - `src/skills/` — the owner's installed SKILL.md collections: discovery under the configured roots (a
   duplicate name is one skill, with the extra copies named), front-matter parsing, and reading one into a
   prompt. **It never executes anything a skill suggests**, and skill text is never evidence about the code
@@ -174,6 +188,31 @@ stop a superseded step from holding the verdict down.
 - `smoke/smoke.mjs` drives two whole missions with a stub host. If you change the schemas in `roles.ts` or
   `peer.ts`, the stub in the smoke suite must change with them — that coupling is deliberate, it is what
   keeps the contract testable without keys or network.
+
+## Local delegation (Ollama, off by default)
+`local_mode { set: "on" | "off" }` flips local delegation at runtime; the config's `local.enabled`
+(default OFF) is only the seed the flip overrides, and the flip survives server restarts. With the mode
+off the workflow is byte-identical to before it existed — zero Ollama calls, not one.
+- **Routing is the leader's, and it is narrow.** Only `role: "implementer"` units the leader marks
+  `local: true` are eligible, and only when the work is well-scoped (boilerplate, types, utilities,
+  CRUD, tests, docs, repetitive refactors). Architecture, cross-file logic, security and debugging stay
+  with the council; the leader unsure keeps the unit. The server also refuses anything beyond the
+  unit's own scope, above `maxFilesPerUnit`, or outside the project — refused, not clamped.
+- **The audit ladder is the merge gate.** Snapshot first, write, then deterministic checks in the
+  owner's order (typecheck → lint → tests, commands configurable per repo), then the mechanical
+  import/API existence check (an import the index cannot resolve, or a name nothing declares, is a
+  reject — no model), then ONE council spec review on the host model. A retry is fed the concrete
+  errors once. A second failure reverts the bytes and the council re-runs the unit, told explicitly not
+  to copy the rejected code.
+- **Reverts are byte-perfect and the rejected output is kept in the dossier** — labelled as not built
+  on. Delegation refuses to run into an uncommitted tree unless `local.allowDirty`: a revert must never
+  be able to eat the owner's uncommitted work.
+- **Counters over vibes.** delegated / audit-passed / audit-rejected / fell-back persist with the
+  state file; `local_mode`, the greeting and each dossier report them, plus the wall-clock and token
+  cost of every local attempt, so the owner can judge whether delegation saves time.
+- The model is a config value (`local.model`) and a flip-time override — swap it for qwen2.5-coder and
+  A/B without touching code. Ollama's own env (`OLLAMA_NUM_PARALLEL`, `OLLAMA_MAX_LOADED_MODELS`)
+  belong to the daemon, not to this server; the config notes them.
 
 ## Round two, and what the copies remember
 - Round two (`collective.peerRound`, one extra model call per unit) exchanges **verified findings only** —
