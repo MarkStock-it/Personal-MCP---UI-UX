@@ -463,6 +463,12 @@ try {
   check("the index follows the move, with that repo's own files", otherIndex.text.includes("src/only.ts") && otherIndex.text.includes("onlyHere"), otherIndex.text.slice(0, 400));
   const backHere = await call("project_root", { path: tmp });
   check("and back, so the rest of the suite still runs on the fixture", !backHere.error && backHere.text.includes(`Project: ${tmp}`), backHere.text.slice(0, 200));
+  // The same move through a tool that is already on any host's approved list: some MCP clients refuse a
+  // tool that appeared after install, which must not mean "this repo cannot be indexed".
+  const viaIndex = await call("code_index", { path: other });
+  check("code_index { path } points the session at another repo too", !viaIndex.error && viaIndex.text.includes("src/only.ts") && viaIndex.text.includes("onlyHere"), viaIndex.text.slice(0, 300));
+  const backAgain = await call("project_root", { path: tmp });
+  check("and the fixture is the project again", !backAgain.error && backAgain.text.includes(`Project: ${tmp}`), backAgain.text.slice(0, 200));
   await fs.rm(other, { recursive: true, force: true });
 
   console.log("== brief workflow ==");

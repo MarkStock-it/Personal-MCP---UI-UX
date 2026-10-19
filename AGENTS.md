@@ -8,7 +8,7 @@ Node >= 20, TypeScript, ESM. `dist/` is committed because the host runs `dist/in
 ```bash
 npm install
 npm run build          # tsc -> dist/
-npm test               # 432-check keyless gate: smoke/smoke.mjs (298, stdio suite) + smoke/arithmetic.mjs (134, the built modules driven directly); no API keys needed
+npm test               # 434-check keyless gate: smoke/smoke.mjs (300, stdio suite) + smoke/arithmetic.mjs (134, the built modules driven directly); no API keys needed
 DESIGN_MCP_PROJECT_DIR=<dir> node smoke/call.mjs <tool> '[json]'   # call one tool
 npm run inspect        # MCP inspector
 npx tsx tools/lab/run.ts   # the memory experiment; see tools/lab/README.md (not a gate)
