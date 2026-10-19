@@ -164,7 +164,8 @@ if (once) {
   process.exit(sync("manual --once") === "failed" ? 1 : 0);
 }
 
-// The watch set: source, checks, the scripts that run them, and the docs that describe them.const WATCH_DIRS = ["src", "smoke", "scripts", "tools"].map((d) => path.join(ROOT, d)).filter((d) => fs.existsSync(d));
+// The watch set: source, checks, the scripts that run them, and the docs that describe them.
+const WATCH_DIRS = ["src", "smoke", "scripts", "tools"].map((d) => path.join(ROOT, d)).filter((d) => fs.existsSync(d));
 const WATCH_FILES = ["AGENTS.md", "README.md", "package.json", "tsconfig.json", "design-mcp.config.json"].map((f) => path.join(ROOT, f)).filter((f) => fs.existsSync(f));
 
 let timer = null;
