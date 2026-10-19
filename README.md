@@ -29,7 +29,7 @@ The `image` role has no keyless option (sampling carries text, not image output)
 Handy for manual sessions: `DESIGN_MCP_PROJECT_DIR=/path/to/site node smoke/call.mjs <tool> '[json]'` calls one tool and prints the result.
 
 ## Test it
-No API keys needed: `npm run build && npm test` runs two harnesses — the stdio smoke suite (261 checks) and `smoke/arithmetic.mjs`, which drives the built modules directly (81 checks) — 342 in all: tool/resource/prompt inventory, the playbook tools, config report, brief create/validate/never-overwrite, the codebase layer against a fixture repo including a tsconfig alias that must resolve to a real file, the reference lookup (a declaration with its kind and export status, every use with its line, a use reached through a tsconfig alias, a name used but never declared, a name nothing mentions, a mention in a document labelled as a mention rather than a call), the edit gate against a fixture whose import graph is known (an anchor that is really there, one that is real but cited at stale lines, one that occurs three times, a line range past the end of the file, a path the leader invented, a path outside the project, an edit in a file the index skipped, the call sites named for an identifier anchor, and the snapshot hash each line number belongs to), the collective's repair pass, its computed verdict and the grade arithmetic behind it (a clean run grades `STRONG`, one edit that cannot be applied or one closing sentence that still contradicts the record stops that, and a claim the repair pass re-cited or withdrew no longer holds the run down), the conclusion gate turning an armed closing paragraph into two flagged sentences and the conclusion repair pass settling them one way each, its round-two conversation and its memory — including one invented quote that must be rejected and then repaired, withdrawn or left unaddressed by three different units, an unevidenced rebuttal that must be marked unproven, a memory entry whose code changed and must retire itself, and the session-install block covering each host's own instruction file — one file per host family, the host's own text never touched, and a removal that cleans every file it wrote — and every graceful error path).
+No API keys needed: `npm run build && npm test` runs two harnesses — the stdio smoke suite (288 checks) and `smoke/arithmetic.mjs`, which drives the built modules directly (93 checks) — 381 in all: tool/resource/prompt inventory, the playbook tools, config report, brief create/validate/never-overwrite, the codebase layer against a fixture repo including a tsconfig alias that must resolve to a real file, the reference lookup (a declaration with its kind and export status, every use with its line, a use reached through a tsconfig alias, a name used but never declared, a name nothing mentions, a mention in a document labelled as a mention rather than a call), the edit gate against a fixture whose import graph is known (an anchor that is really there, one that is real but cited at stale lines, one that occurs three times, a line range past the end of the file, a path the leader invented, a path outside the project, an edit in a file the index skipped, the call sites named for an identifier anchor, and the snapshot hash each line number belongs to), the collective's repair pass, its computed verdict and the grade arithmetic behind it (a clean run grades `STRONG`, one edit that cannot be applied or one closing sentence that still contradicts the record stops that, and a claim the repair pass re-cited or withdrew no longer holds the run down), the conclusion gate turning an armed closing paragraph into two flagged sentences and the conclusion repair pass settling them one way each, its round-two conversation and its memory — including one invented quote that must be rejected and then repaired, withdrawn or left unaddressed by three different units, an unevidenced rebuttal that must be marked unproven, a memory entry whose code changed and must retire itself, and the session-install block covering each host's own instruction file — one file per host family, the host's own text never touched, and a removal that cleans every file it wrote — and every graceful error path).
 With keys, in Cursor chat: "run providers_config", then "run providers_test for each role", then "usage_report".
 Or: `npm run inspect`.
 
@@ -274,6 +274,33 @@ being worked on, so add it to that project's `.gitignore`.
 
 Configuration for the two phases above lives under `skills` (`enabled`, `roots`, `maxSkillKB`,
 `maxInPromptKB`) alongside the `codebase` and `collective` blocks in `src/config.ts`.
+
+### Phase 7½: local delegation through Ollama (optional, off by default)
+
+If a small local coder model lives on the machine (`ollama`), the collective can hand its well-scoped
+implementer work to that model and keep the quality control for itself. Off by default — **with the mode
+off, zero Ollama calls happen and the workflow is byte-identical**:
+
+```bash
+local_mode { set: "on" }        # health check first; refuses unless Ollama answers and the model is pulled
+local_mode { set: "off" }       # immediate: aborts the request in flight, refuses every queued task
+local_mode { }                  # status: mode, source, model, per-request values, lifetime counters
+```
+
+- `collective.local` in the config is the seed the flip overrides: `enabled` (OFF), `host`, `model`
+  (swappable — point it at `qwen2.5-coder:7b` for an A/B), `numCtx` 8192, `temperature` 0.1,
+  `numThread` 5, `keepAliveM` 5, `timeoutSec` 120, `maxConcurrent` 1, `maxFilesPerUnit` 3, and the
+  audit commands `audit.typecheckCmd` / `lintCmd` / `testCmd` (auto-skipped when unset).
+- **Nothing merges on the model's word.** The local model returns full file contents; the previous
+  bytes are snapshotted; the write is audited in order (typecheck → lint → tests → mechanical
+  import/API existence against the index → one council spec review); failure reverts byte-for-byte,
+  feeds the concrete errors back ONCE, and a second failure hands the unit to the council with the
+  reason — and the rejected output is kept in the dossier, labelled as not built on.
+- Writes are refused outside the unit's own scope, above the file cap, or when the tree has uncommitted
+  changes (`allowDirty` overrides — a revert must never eat your uncommitted work).
+- Every dossier carries a **Local delegation** section and the lifetime counters (delegated /
+  audit-passed / audit-rejected / fell-back) are reported by `local_mode` and the greeting, so the
+  question "is the local model actually saving me time?" has a number under it.
 
 ## Phase 8: "Hello collective." — and your own skills
 

@@ -32,6 +32,8 @@ import { addRuling, clearMemory, loadMemory, renderMemoryReport } from "./collec
 import { PERSONAS, roster } from "./collective/personas.js";
 import { LeaderPlanSchema, leaderSystem, leaderUser } from "./collective/roles.js";
 import { helloCollective } from "./collective/hello.js";
+import { cancelAll, health, localCounters, resetWarned, settingsFor } from "./ollama/client.js";
+import { effectiveLocal, recordHealth, renderLocalStatus, writeLocalMode } from "./ollama/state.js";
 import { installSessionBlock, removeSessionBlock, renderInstallReport } from "./collective/install.js";
 import { discoverSkills, findSkill, readSkill, renderSkillIndex } from "./skills/index.js";
 import { listDossiers, loadDossier, runMission } from "./collective/run.js";
@@ -1006,7 +1008,7 @@ server.registerTool(
           ...(repair === undefined ? {} : { repairRound: repair }),
           ...(conclusion === undefined ? {} : { conclusionRepair: conclusion }),
         };
-        const r = await runMission(projectDir(), { codebase: config.codebase, collective, skills: config.skills }, { mission, focus, paths, units, workers, skills }, log);
+        const r = await runMission(projectDir(), { codebase: config.codebase, collective, skills: config.skills, local: config.local }, { mission, focus, paths, units, workers, skills }, log);
         log(`dossier written to ${path.relative(projectDir(), r.file)}`);
         return [
           `Dossier: ${path.relative(projectDir(), r.file)}`,
@@ -1018,9 +1020,8 @@ server.registerTool(
       });
       return ok(
         [
-          `Mission started (job ${job.id}).`,
-          `Leader and workers run on ${config.roles.leader.provider}/${config.roles.leader.model} and ${config.roles.worker.provider}/${config.roles.worker.model}.`,
-          "Check progress with design_status; the result is the full dossier, also saved under .design-mcp/collective/.",
+        `Mission started (job ${job.id}).`,
+        `Leader and workers run on ${config.roles.leader.provider}/${config.roles.leader.model} and ${config.roles.worker.provider}/${config.roles.worker.model}.${effectiveLocal(projectDir(), config.local).on ? " Local mode is ON: units the leader marks eligible are delegated to the local model and audited." : ""}`,
         ].join("\n")
       );
     } catch (e) {
@@ -1099,6 +1100,58 @@ server.registerTool(
       const { config } = loadConfig();
       const r = await helloCollective(projectDir(), config, { focus, budgetTokens, skills });
       return ok(r.text);
+    } catch (e) {
+      return fail(e);
+    }
+  }
+);
+
+server.registerTool(
+  "local_mode",
+  {
+    title: "Local model mode (Ollama) on/off and its status",
+    description:
+      'With no arguments: the current local-delegation status — on/off, which source set it, the model, host and per-request values, the lifetime counters (delegated / audit-passed / audit-rejected / fell back) and this session\'s transport counters. With { set: "on" }: runs a health check first (Ollama must be reachable and the model must be pulled) and only then flips the mode on; it stays on across server restarts until you flip it off. With { set: "off" }: flips off immediately, aborts the request in flight and refuses every queued local task — those units fall back to the council. Passing model also sets (or swaps, for an A/B test) the model the mode runs on.',
+    inputSchema: {
+      set: z.enum(["on", "off"]).optional().describe("Flip local delegation on or off at runtime; omit to just read the status"),
+      model: z.string().optional().describe("The Ollama model tag to delegate to, e.g. deepseek-coder-v2:latest or qwen2.5-coder:7b"),
+    },
+  },
+  async ({ set, model }) => {
+    try {
+      const root = projectDir();
+      const { config } = loadConfig();
+      const local = config.local;
+      if (set === "off") {
+        // Immediate: abort what is on the wire and revoke every queued call before the file even lands.
+        cancelAll();
+        writeLocalMode(root, { on: false, model });
+        return ok(["Local mode is OFF. The request in flight was aborted and queued local tasks were refused; their units go back to the council.", "", renderLocalStatus(root, local)].join("\n"));
+      }
+      if (set === "on") {
+        // Health check BEFORE the flip: an on that cannot run is worse than staying off, because every
+        // unit would then silently pay a health-check round-trip before falling back anyway.
+        const h = await health(settingsFor(local));
+        if (!h.ok) {
+          return fail(new Error(`Local mode stays off: ${h.detail}\nStart Ollama (ollama serve) and pull the model (ollama pull ${model ?? local.model}), then flip it on again.`));
+        }
+        if (h.modelMissing) {
+          return fail(new Error(`Local mode stays off: the model "${model ?? local.model}" is not pulled. Available: ${h.models.join(", ")}.\nRun: ollama pull ${model ?? local.model}`));
+        }
+        const state = writeLocalMode(root, { on: true, model });
+        resetWarned();
+        const effModel = state.model ?? local.model; // the effective model, never a bare "undefined"
+        return ok([`Local mode is ON (${effModel}); Ollama answered and the model is present.`, "The leader may mark well-scoped implementer units local; their output is audited (typecheck → lint → tests → import check → council review) before it is kept.", "", renderLocalStatus(root, local)].join("\n"));
+      }
+      const eff = effectiveLocal(root, local);
+      const counters = localCounters();
+      return ok(
+        [
+          renderLocalStatus(root, local),
+          `this session's transport: ${counters.calls} request(s), ${counters.errors} failed, ${counters.timeouts} timed out, ${counters.refused} queued then cancelled by a mode switch`,
+          eff.on ? "Health is checked when it is flipped on and before a mission delegates; with the mode off, zero Ollama calls happen." : "With the mode off, zero Ollama calls happen.",
+        ].join("\n")
+      );
     } catch (e) {
       return fail(e);
     }
@@ -1437,6 +1490,28 @@ server.registerPrompt(
     };
   }
 );
+
+// Resource safety, at boot: when local mode is on (runtime state or config), check Ollama once here so
+// the owner hears about an unreachable daemon or a missing model before a mission quietly falls back.
+// It never blocks the MCP surface from coming up, and it speaks only through stderr — the one channel
+// index.ts may use. With the mode off this whole block costs nothing and touches nothing.
+try {
+  const root = projectDir();
+  const { config: bootConfig } = loadConfig();
+  const eff = effectiveLocal(root, bootConfig.local);
+  if (eff.on) {
+    const h = await health(settingsFor(bootConfig.local));
+    const note = h.ok
+      ? h.modelMissing
+        ? `Ollama is up but the model "${eff.model}" is not pulled (available: ${h.models.join(", ") || "none"}). Local units will refuse until: ollama pull ${eff.model}`
+        : `Ollama is up and the model "${eff.model}" is present — local delegation is armed.`
+      : `Ollama at ${bootConfig.local.host} is unreachable at startup (${h.detail ?? "no detail"}); local units will fall back to the council until it answers.`;
+    console.error(`local mode: ${note}`);
+    recordHealth(root, note);
+  }
+} catch {
+  // A boot health check that cannot run is a warning, never a reason the server fails to start.
+}
 
 const transport = new StdioServerTransport();
 await server.connect(transport);

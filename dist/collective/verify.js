@@ -302,7 +302,7 @@ export function conflictsIn(units, reports) {
 }
 /** The same gate, for claims the host's own assistant wants checked before it answers. */
 export async function verifyCallerClaims(projectRoot, claims) {
-    const units = [{ id: "caller", role: "explorer", objective: "claims supplied by the caller, checked against the files", scope: [], mustAnswer: ["is every quote where it says it is?"], doneWhen: [] }];
+    const units = [{ id: "caller", role: "explorer", objective: "claims supplied by the caller, checked against the files", scope: [], mustAnswer: ["is every quote where it says it is?"], doneWhen: [], local: false }];
     const reports = [
         {
             unit: "caller",

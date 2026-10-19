@@ -17,7 +17,8 @@
  */
 import fs from "node:fs/promises";
 import path from "node:path";
-import type { CodebaseConfig, CollectiveConfig, SkillsConfig } from "../config.js";
+import type { CodebaseConfig, CollectiveConfig, LocalConfig, SkillsConfig } from "../config.js";
+import { readLocalState, renderLocalStatus } from "../ollama/state.js";
 import { estimateTokens, getIndex, renderDigest } from "../codebase/store.js";
 import { run } from "../util/exec.js";
 import { loadMemory } from "./memory.js";
@@ -29,6 +30,8 @@ export interface HelloConfig {
   codebase: CodebaseConfig;
   collective: CollectiveConfig;
   skills: SkillsConfig;
+  /** Optional: present when the owner has a `local` block or a runtime flip — the greeting reports its state. */
+  local?: LocalConfig;
 }
 
 export interface HelloOptions {
@@ -94,6 +97,11 @@ export async function helloCollective(projectRoot: string, cfg: HelloConfig, opt
   const memory = cfg.collective.memory ? await loadMemory(projectRoot) : { items: [], stale: [], live: [] };
   const missions = await lastMissions(projectRoot, opts.missions ?? 3);
   const git = await gitState(projectRoot);
+  // Local mode's state, one small file read — it is the answer to "is the local model in the loop?".
+  const localState = cfg.local ? readLocalState(projectRoot) : null;
+  const localLine = localState
+    ? `\n## Local delegation${localState.note ? `\n${localState.note.replace(/\n/g, " ")}` : ""}\n${renderLocalStatus(projectRoot, cfg.local!)}\nWith the mode off, zero Ollama calls happen; with it on, units the leader marks eligible (well-scoped implementer work only) are written by the local model and audited before anything is kept.`
+    : "";
 
   let scan: SkillScan | null = null;
   if (cfg.skills.enabled && opts.skills !== false) {
@@ -125,6 +133,7 @@ export async function helloCollective(projectRoot: string, cfg: HelloConfig, opt
         ]
       : []),
     "",
+    ...(localLine ? [localLine, ""] : []),
     "## Open work",
     ...(missions.length
       ? missions.map((m) => `- ${m.id} — ${m.mission}\n    .design-mcp/collective/${m.id}.md${m.grade ? ` · verdict ${m.grade}` : ""}${m.head ? ` · ${m.head}` : ""}`)

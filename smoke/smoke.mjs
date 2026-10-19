@@ -8,6 +8,7 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 import { CreateMessageRequestSchema } from "@modelcontextprotocol/sdk/types.js";
 import fs from "node:fs/promises";
+import http from "node:http";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -81,6 +82,53 @@ for (const [rel, text] of Object.entries(FIXTURE)) {
   await fs.mkdir(path.dirname(path.join(tmp, rel)), { recursive: true });
   await fs.writeFile(path.join(tmp, rel), text);
 }
+
+// A stub Ollama daemon. `/api/tags` answers the health check; `/api/generate` answers the delegated
+// units. Its behaviour is policy-driven so the suite can run the same mission twice and get failure
+// first, applied second — which is exactly what the one-retry-then-take-over rule is about.
+const ollamaPolicy = { mode: "bad-import" }; // "bad-import" | "good"
+const ollamaRequests = [];
+// Good output: imports a real export of the fixture, compiles under strict, uses no new dependency.
+const GOOD_HELPER = [
+  'import { normalise } from "./util.js";',
+  "",
+  "export function normaliseAll(inputs: string[]): string {",
+  "  return inputs.map((input) => normalise(input)).join(\" \");",
+  "}",
+].join("\n");
+// Bad output: invents a module (`./deep-clean.js`) and an unused-name import (`scrubAll`) — exactly what
+// the mechanical import/API check exists to reject without asking any model.
+const BAD_HELPER = [
+  'import { scrubAll } from "./deep-clean.js";',
+  "",
+  "export function normaliseAll(inputs: string[]): string {",
+  "  return scrubAll(inputs).join(\" \");",
+  "}",
+].join("\n");
+const ollamaServer = http.createServer((req, res) => {
+  let body = "";
+  req.on("data", (c) => (body += c));
+  req.on("end", () => {
+    ollamaRequests.push({ url: req.url, body });
+    const parsed = body ? JSON.parse(body) : {};
+    if (req.url === "/api/tags") {
+      res.setHeader("content-type", "application/json");
+      res.end(JSON.stringify({ models: [{ name: "stub-coder:latest" }, { name: "qwen2.5-coder:7b" }] }));
+      return;
+    }
+    if (req.url === "/api/generate") {
+      res.setHeader("content-type", "application/json");
+      const files = [{ path: "src/extra-cleaner.ts", content: ollamaPolicy.mode === "good" ? GOOD_HELPER : BAD_HELPER }];
+      res.end(JSON.stringify({ response: JSON.stringify({ files }) }));
+      return;
+    }
+    res.statusCode = 404;
+    res.end("{}");
+    void parsed;
+  });
+});
+await new Promise((ok) => ollamaServer.listen(0, "127.0.0.1", ok));
+const ollamaPort = ollamaServer.address().port;
 
 // A stub host that answers the way Cursor/Freebuff would: it recognises a leader call, a worker call and
 // a synthesis call, and it deliberately includes one invented quote so the server has something to reject.
@@ -205,8 +253,27 @@ client.setRequestHandler(CreateMessageRequestSchema, async (req) => {
   // so a host cannot mistake it for a closing pass or for one of the other two repairs.
   if (/A CONCLUSION THE RECORD CONTRADICTS/.test(prompt)) return answer(JSON.stringify(conclusionRepairAnswer()));
   if (/REPAIR PASS/.test(prompt)) return answer(JSON.stringify(repairAnswer(unit?.[1] ?? "explore-util")));
+  // The council spec review of LOCAL output: the audit ladder's last step, one call, pass/fail by decision.
+  // The suite's deterministic failure path comes from the import check, so this review passes when it runs.
+  if (/review code a small local model wrote/.test(prompt)) return answer(JSON.stringify({ decision: "pass", issues: [] }));
   if (/now reading what the other copies of yourself found/.test(prompt)) return answer(JSON.stringify(peerResponse(unit?.[1] ?? "explore-util")));
   if (unit) return answer(JSON.stringify(workerReport(unit[1])));
+  // The LOCAL mission's plan: an implementer unit explicitly offered to the local model ("local": true)
+  // plus one verifier, so the audit ladder and the verdict's other machinery both have something to do.
+  if (/You are the LEADER/.test(prompt) && /normaliseAll/.test(prompt)) {
+    return answer(
+      JSON.stringify({
+        restated: "Add a normaliseAll() helper beside the existing normalise() export.",
+        risks: [],
+        assumptions: [],
+        unknowns: [],
+        units: [
+          { id: "write-helper", role: "implementer", objective: "Write the normaliseAll() helper for src/util.ts (LOCAL UNIT).", scope: ["src/util.ts"], mustAnswer: ["what does normaliseAll([' A ',' b ']) return?"], doneWhen: ["the helper is exported and the existing cleaner is reused", "normaliseAll([\" A \",\"b\"]) === \"a b\""], local: true },
+          { id: "check-helper", role: "verifier", objective: "Try to falsify the claim that normalise() is the only place input is cleaned.", scope: ["src/leaky.ts"], mustAnswer: ["who else cleans input?"], doneWhen: [] },
+        ],
+      })
+    );
+  }
   if (/You are the LEADER/.test(prompt) && /"units"/.test(prompt)) {
     return answer(
       JSON.stringify({
@@ -257,8 +324,10 @@ try {
     "code_index", "code_digest", "code_context", "code_refs", "code_verify_cites", "code_verify_edits", "collective_plan", "collective_run", "collective_report", "collective_memory",
     // waking the collective, and the owner's own skills
     "collective_hello", "collective_install", "skills_list", "skills_read",
+    // the optional local-model delegation (off by default: zero Ollama calls until local_mode flips it on)
+    "local_mode",
   ];
-  check(`33 tools registered (${names.length} found)`, names.length === expected.length, names.join(","));
+  check(`34 tools registered (${names.length} found)`, names.length === expected.length, names.join(","));
   check("all expected tools present", expected.every((n) => names.includes(n)));
 
   console.log("== resources + prompts (the playbook is addressable, not only callable) ==");
@@ -864,11 +933,89 @@ try {
     /Nothing else in the conclusion was touched/.test(status4) && /a repair answers the sentences it was handed, by number/.test(status4)
   );
 
+  console.log("== local delegation (Ollama, off by default) ==");
+  // The memory-staleness test above deliberately truncated src/util.ts so one of its entries had to
+  // retire. The local missions run their audit against real exports, so the fixture goes back first —
+  // this is test setup restoring its own fixture, not the server repairing anything.
+  await fs.writeFile(path.join(tmp, "src", "util.ts"), FIXTURE["src/util.ts"]);
+  const lmOff = await call("local_mode");
+  check("the status says the mode is off and who set it that way", !lmOff.error && /local mode: off \(config default/.test(lmOff.text), lmOff.text.slice(0, 300));
+  check("and that the config, not a runtime flip, decided this", !lmOff.error && /config default; flip it with local_mode/.test(lmOff.text));
+  // Config written BEFORE these checks (this is also where the default roles assertion at the top is safe:
+  // it already ran). Local points at a closed port first, so the flip-on health check can be seen refusing.
+  const configPath = path.join(tmp, "design-mcp.config.json");
+  await fs.writeFile(
+    configPath,
+    JSON.stringify({ local: { enabled: false, host: "http://127.0.0.1:9", model: "stub-coder:latest" } }, null, 2)
+  );
+  const flipBroken = await call("local_mode", { set: "on" });
+  check("flipping on without a reachable Ollama refuses, with the reason", flipBroken.error && /Local mode stays off/.test(flipBroken.text) && /unreachable/.test(flipBroken.text), flipBroken.text.slice(0, 300));
+  check("the refusal tells the owner the exact next move", flipBroken.error && /ollama serve|ollama pull/.test(flipBroken.text), flipBroken.text.slice(0, 400));
+
+  await fs.writeFile(configPath, JSON.stringify({ local: { enabled: false, host: `http://127.0.0.1:${ollamaPort}`, model: "stub-coder:latest" } }, null, 2));
+  const flipOk = await call("local_mode", { set: "on", model: "stub-coder:latest" });
+  check("a healthy flip-on turns the mode on", !flipOk.error && /Local mode is ON \(stub-coder:latest\)/.test(flipOk.text), flipOk.text.slice(0, 300));
+  check("the flip records that Ollama answered and the model is present", !flipOk.error && /Ollama answered and the model is present/.test(flipOk.text));
+  const lmOn = await call("local_mode");
+  check("the status now says ON and names the runtime flip", !lmOn.error && /local mode: ON \(set with local_mode/.test(lmOn.text), lmOn.text.slice(0, 400));
+
+  // Mission one: the local model writes an invented import. The mechanical check rejects it, the retry
+  // is handed the concrete reason and fails the same way, so the council takes the unit over.
+  ollamaPolicy.mode = "bad-import";
+  const runL1 = await call("collective_run", { mission: "Use the local coder model to draft the normaliseAll helper.", workers: 2 });
+  check("the local mission starts", !runL1.error && /Mission started/.test(runL1.text), runL1.text.slice(0, 200));
+  let statusL1 = "";
+  for (let i = 0; i < 100; i++) {
+    const st = await call("design_status");
+    statusL1 = st.text;
+    if (/DONE|FAILED/.test(st.text)) break;
+    await new Promise((r) => setTimeout(r, 250));
+  }
+  check("the local mission completes even though the local model failed", /DONE/.test(statusL1), statusL1.slice(0, 300));
+  check("the dossier has a local delegation section", /## Local delegation \(Ollama\)/.test(statusL1), statusL1.slice(0, 200));
+  check("the failed write is named as rejected-and-taken-over, not softened", /rejected-and-taken-over/.test(statusL1) && /council takes (?:this|the) unit over/.test(statusL1), statusL1.slice(statusL1.indexOf("## Local delegation"), statusL1.indexOf("## Local delegation") + 700));
+  check("the invented import is the concrete reject the audit gave", /normaliseAll|extra-cleaner|deep-clean/.test(statusL1.slice(statusL1.indexOf("## Local delegation"), statusL1.indexOf("## Local delegation") + 1500)) || /deep-clean/.test(statusL1), statusL1.slice(statusL1.indexOf("## Local delegation"), statusL1.indexOf("## Local delegation") + 1500));
+  check("the one retry is visible: two attempts, both recorded", /attempt 1 \(the raw local output/.test(statusL1) && /attempt 2 \(the raw local output/.test(statusL1), statusL1.slice(statusL1.indexOf("## Local delegation"), statusL1.indexOf("## Local delegation") + 2200));
+  check("the takeover prompt tells the council to redo the unit from real source", seenPrompts.some((p) => /THE LOCAL MODEL TRIED THIS UNIT FIRST AND DID NOT PASS/.test(p) && /Do not copy any of its code; the audit already deleted it/.test(p)), `local takeover prompts: ${seenPrompts.filter((p) => /THE LOCAL MODEL TRIED/.test(p)).length}`);
+  const leftoverAfterFail = await fs.stat(path.join(tmp, "src", "extra-cleaner.ts")).catch(() => null);
+  check("the failed write is gone from disk: the snapshot revert leaves nothing behind", leftoverAfterFail === null);
+  check("the counters count one delegated, one audit-rejected", /1 delegated · 0 audit-passed · 1 audit-rejected/.test((await call("local_mode")).text), (await call("local_mode")).text.slice(0, 500));
+
+  // Mission two: the local model writes clean code. The ladder passes everything and the file stays.
+  ollamaPolicy.mode = "good";
+  const runL2 = await call("collective_run", { mission: "Take the normaliseAll helper from the local model and keep it.", workers: 2 });
+  check("the second local mission starts", !runL2.error && /Mission started/.test(runL2.text), runL2.text.slice(0, 200));
+  let statusL2 = "";
+  for (let i = 0; i < 100; i++) {
+    const st = await call("design_status");
+    statusL2 = st.text;
+    if (/DONE|FAILED/.test(st.text)) break;
+    await new Promise((r) => setTimeout(r, 250));
+  }
+  check("the applied outcome is named", /applied|applied-with-retry/.test(statusL2.slice(statusL2.indexOf("## Local delegation"), statusL2.indexOf("## Local delegation") + 700)), statusL2.slice(statusL2.indexOf("## Local delegation"), statusL2.indexOf("## Local delegation") + 700));
+  const kept = await fs.readFile(path.join(tmp, "src", "extra-cleaner.ts"), "utf8").catch(() => "");
+  check("the audited file is on disk with the local model's content, kept", kept === GOOD_HELPER || /normaliseAll/.test(kept), kept.slice(0, 200));
+  check("the write is marked kept in the dossier", /extra-cleaner\.ts \(kept/.test(statusL2), statusL2.slice(statusL2.indexOf("## Local delegation"), statusL2.indexOf("## Local delegation") + 800));
+  check("the reason says the whole ladder ran, in order", /deterministic checks, import check, then the council spec review/.test(statusL2), statusL2.slice(statusL2.indexOf("## Local delegation"), statusL2.indexOf("## Local delegation") + 900));
+  const lmAfter = await call("local_mode");
+  check("lifetime counters: 2 delegated, 1 audit-passed, 1 audit-rejected", !lmAfter.error && /2 delegated · 1 audit-passed · 1 audit-rejected/.test(lmAfter.text), lmAfter.text.slice(0, 500));
+  // The request the stub actually received: the per-request values are the config's, not hardcoded ones.
+  const lastLocal = JSON.parse(ollamaRequests.filter((r) => r.url === "/api/generate").at(-1).body);
+  check("each request carries the configured model and keep_alive", lastLocal.model === "stub-coder:latest" && lastLocal.keep_alive === "5m", JSON.stringify(lastLocal).slice(0, 200));
+  check("each request carries num_ctx, temperature and num_thread from the config", lastLocal.options.num_ctx === 8192 && lastLocal.options.temperature === 0.1 && lastLocal.options.num_thread === 5, JSON.stringify(lastLocal.options)) ;
+  check("the leader's local routing rule reached the plan prompt", seenPrompts.some((p) => /optional local delegation/.test(p) && /When in doubt keep it/.test(p)), seenPrompts.find((p) => /optional local delegation/.test(p))?.slice(0, 200));
+
+  const flipOff = await call("local_mode", { set: "off" });
+  check("flipping off announces the immediate stop", !flipOff.error && /Local mode is OFF/.test(flipOff.text) && /aborted/.test(flipOff.text), flipOff.text.slice(0, 300));
+  const lmAfterOff = await call("local_mode");
+  check("the status returns to off, recorded as a runtime decision", !lmAfterOff.error && /local mode: off \(set with local_mode/.test(lmAfterOff.text), lmAfterOff.text.slice(0, 300));
+
   const missionPrompt = await client.getPrompt({ name: "collective_mission", arguments: { mission: "ship the cleaning change" } });
   check("the mission prompt carries the whole protocol", /Run it as the collective/.test(missionPrompt.messages?.[0]?.content?.text ?? "") && /CITATION CONTRACT/.test(missionPrompt.messages[0].content.text));
 } finally {
   await client.close().catch(() => {});
-  await fs.rm(tmp, { recursive: true, force: true }).catch(() => {});
+  if (process.env.KEEP_TMP) console.error(`KEEP_TMP: tmp kept at ${tmp}`);
+  else await fs.rm(tmp, { recursive: true, force: true }).catch(() => {});
 }
 
 console.log(failures ? `\nSMOKE FAIL: ${failures} check(s)` : "\nSMOKE PASS");

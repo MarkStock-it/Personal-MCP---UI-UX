@@ -17,6 +17,7 @@
  */
 import fs from "node:fs/promises";
 import path from "node:path";
+import { readLocalState, renderLocalStatus } from "../ollama/state.js";
 import { estimateTokens, getIndex, renderDigest } from "../codebase/store.js";
 import { run } from "../util/exec.js";
 import { loadMemory } from "./memory.js";
@@ -66,6 +67,11 @@ export async function helloCollective(projectRoot, cfg, opts = {}) {
     const memory = cfg.collective.memory ? await loadMemory(projectRoot) : { items: [], stale: [], live: [] };
     const missions = await lastMissions(projectRoot, opts.missions ?? 3);
     const git = await gitState(projectRoot);
+    // Local mode's state, one small file read — it is the answer to "is the local model in the loop?".
+    const localState = cfg.local ? readLocalState(projectRoot) : null;
+    const localLine = localState
+        ? `\n## Local delegation${localState.note ? `\n${localState.note.replace(/\n/g, " ")}` : ""}\n${renderLocalStatus(projectRoot, cfg.local)}\nWith the mode off, zero Ollama calls happen; with it on, units the leader marks eligible (well-scoped implementer work only) are written by the local model and audited before anything is kept.`
+        : "";
     let scan = null;
     if (cfg.skills.enabled && opts.skills !== false) {
         scan = await discoverSkills(projectRoot, cfg.skills);
@@ -95,6 +101,7 @@ export async function helloCollective(projectRoot, cfg, opts = {}) {
             ]
             : []),
         "",
+        ...(localLine ? [localLine, ""] : []),
         "## Open work",
         ...(missions.length
             ? missions.map((m) => `- ${m.id} — ${m.mission}\n    .design-mcp/collective/${m.id}.md${m.grade ? ` · verdict ${m.grade}` : ""}${m.head ? ` · ${m.head}` : ""}`)
