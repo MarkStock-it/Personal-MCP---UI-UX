@@ -15,6 +15,7 @@ import fs from "node:fs";
 import path from "node:path";
 import type { LocalConfig } from "../config.js";
 import { stateDir } from "../config.js";
+import { isCloudModel } from "./client.js";
 
 export interface LocalCounters {
   delegated: number;
@@ -127,8 +128,14 @@ export function renderLocalStatus(root: string, local: LocalConfig): string {
   const eff = effectiveLocal(root, local);
   const lines: string[] = [];
   lines.push(`local mode: ${eff.on ? "ON" : "off"} (${eff.source === "runtime" ? "set with local_mode; overrides the config" : "config default; flip it with local_mode"})`);
-  lines.push(`model: ${eff.model}`);
-  lines.push(`host: ${local.host} · num_ctx ${local.numCtx} · temperature ${local.temperature} · num_thread ${local.numThread} · keep_alive ${local.keepAliveM}m · timeout ${local.timeoutSec}s · maxConcurrent ${local.maxConcurrent}`);
+  const cloud = isCloudModel(eff.model);
+  if (cloud) {
+    lines.push(`model: ${eff.model} — an Ollama cloud model: it runs on ollama.com, so the code slices sent to it leave this machine (the audit ladder and the council review still run after it answers).`);
+    lines.push(`host: ${local.host} (the local daemon proxies to ollama.com) · num_ctx ${local.numCtx} · temperature ${local.temperature} · timeout ${local.timeoutSec}s · maxConcurrent ${local.maxConcurrent}`);
+  } else {
+    lines.push(`model: ${eff.model}`);
+    lines.push(`host: ${local.host} · num_ctx ${local.numCtx} · temperature ${local.temperature} · num_thread ${local.numThread} · keep_alive ${local.keepAliveM}m · timeout ${local.timeoutSec}s · maxConcurrent ${local.maxConcurrent}`);
+  }
   const c = state?.counters;
   if (c && (c.delegated || c.applied || c.auditFailed || c.fallback)) {
     lines.push(`lifetime: ${c.delegated} delegated · ${c.applied} audit-passed · ${c.auditFailed} audit-rejected · ${c.fallback} fell back to the council`);

@@ -71,13 +71,20 @@ async function listOne(root, ignore, maxFiles) {
 export async function listFiles(projectRoot, opts) {
     const files = [];
     const notes = [];
+    const root = path.resolve(projectRoot);
     for (const r of opts.roots) {
-        const abs = path.resolve(projectRoot, r);
-        if (!abs.startsWith(projectRoot)) {
+        const abs = path.resolve(root, r);
+        // Containment by path.relative, not by string prefix: a prefix test accepts a SIBLING whose name merely
+        // starts with the project's (`../proj-old` next to `proj`), which would index files outside the project
+        // and cite them as if they were inside it, and it breaks outright when the two sides are spelled
+        // differently (`E:/x` against `E:\\x`, or a trailing separator). The edit gate and the citation gate
+        // already guard this way; the scanner was the one that did not.
+        const rel = path.relative(root, abs); // "" for the project root itself, which is inside
+        if (rel.startsWith("..") || path.isAbsolute(rel)) {
             notes.push(`root "${r}" is outside the project and was ignored`);
             continue;
         }
-        const base = path.relative(projectRoot, abs).replace(/\\/g, "/");
+        const base = rel.replace(/\\/g, "/");
         const { files: found, note } = await listOne(abs, opts.ignore, opts.maxFiles - files.length);
         if (note)
             notes.push(`${r}: ${note}`);

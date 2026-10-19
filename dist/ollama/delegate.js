@@ -22,7 +22,7 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import { projectDir } from "../config.js";
 import { run as runCmd } from "../util/exec.js";
-import { generate, health, isSwitchedOff, isTimeout } from "./client.js";
+import { generate, health, isCloudModel, isSwitchedOff, isTimeout } from "./client.js";
 const LOCAL_SYSTEM = `You write ONE code change. You return FULL FILES, not diffs.
 
 Rules:
@@ -284,7 +284,7 @@ export async function delegateUnit(unit, mission, index, knownNames, local, sett
                     problems = checkImports(files, index, knownNames);
                 if (!problems.length && !local.audit.skipExistingTests) {
                     // The council spec review — one host-model call at temperature 0.
-                    problems = await specReview(unit, mission, files, feedback);
+                    problems = await specReview(unit, mission, files, settings.model, feedback);
                 }
                 if (problems.length) {
                     await revert(snapshots, detail);
@@ -349,15 +349,23 @@ async function checkHealth(settings, log) {
     }
     return true;
 }
+/**
+ * Who wrote the code under review, in words the reviewer can calibrate suspicion against. "Small local
+ * model" was true when the only target was a 15B model on this machine; a `:cloud` tag is neither small
+ * nor local, and telling the reviewer otherwise would tune its suspicion to the wrong thing.
+ */
+const provenance = (model) => model && isCloudModel(model)
+    ? `a delegated model (${model}, served by ollama.com — large, remote, and still not to be trusted on APIs it was not shown)`
+    : `a small local model${model ? ` (${model})` : ""}`;
 /** The council's spec review, one host-model call. Replaces a build system's word with a reading. */
-async function specReview(unit, mission, files, priorFeedback) {
+async function specReview(unit, mission, files, model, priorFeedback) {
     const { askJson } = await import("../collective/ask.js");
     const { z } = await import("zod");
     const SpecSchema = z.object({ decision: z.enum(["pass", "fail"]), issues: z.array(z.string()).max(10).default([]) });
     const diff = files.map((f) => `--- ${f.path} (final content) ---\n${f.content}`).join("\n\n");
     const ask = await askJson({
         role: "worker",
-        system: "You review code a small local model wrote. Be suspicious; the local model invents APIs when the context is vague. Answer pass ONLY if every required change is really there and nothing else moved: no invented functions or imports, no scope creep, no silent behaviour change. Mild style differences are not issues.",
+        system: `You review code ${provenance(model)} wrote. Be suspicious; it invents APIs when the context is vague. Answer pass ONLY if every required change is really there and nothing else moved: no invented functions or imports, no scope creep, no silent behaviour change. Mild style differences are not issues.`,
         user: `MISSION: ${mission}\nUNIT OBJECTIVE: ${unit.objective}\nDONE WHEN: ${unit.doneWhen.join("; ") || "(not stated)"}\nMUST ANSWER:\n${unit.mustAnswer.map((q) => `- ${q}`).join("\n")}\n${priorFeedback ? `The FIRST attempt was rejected for:\n${priorFeedback}\n` : ""}\n=== THE WRITTEN CODE ===\n${diff}\n=== END ===\n\nReply JSON only: {"decision":"pass|fail","issues":["..."]}`,
         schema: SpecSchema,
         maxTokens: 900,

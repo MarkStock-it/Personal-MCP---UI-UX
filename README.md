@@ -13,6 +13,27 @@ npm run build
 Copy `cursor-mcp.example.json` into Cursor's MCP settings (or `.cursor/mcp.json`), fix the two paths, add your keys.
 Copy `design-mcp.config.json` into your website project root to choose providers per role.
 
+### Keeping the running server current
+
+The host runs a build, not your source, so point its MCP entry at the launcher instead of the build:
+
+```json
+{ "mcpServers": { "design-mcp": { "command": "node", "args": ["<this repo>/scripts/serve.mjs"] } } }
+```
+
+`serve.mjs` compares the newest `.ts` with the newest emitted file, runs `tsc` when the build is stale, and
+then starts the server — a session that begins after an edit gets the edited server, with no remembered
+build step. A failed compile starts the last good build and logs the errors to stderr, so a half-finished
+edit costs you a stale build rather than a broken tool set; stdout stays clean because it carries the
+protocol. The server keeps the directory the host launched it from, so the project-root resolution in
+`project_root` still sees the folder you actually have open.
+
+For the other half — `npm run autosync` — watch, build, gate, commit and push whenever the source changes:
+`npm run sync` does one pass and exits. It refuses to commit anything that does not compile or pass
+`npm test`, stages only this project's own paths (never a stray `.env`), and leaves the commit local if the
+push fails. A live session still needs a reconnect to load the new build; the launcher handles the next
+spawn.
+
 ## Switching providers
 Edit `roles` in `design-mcp.config.json`. Changes apply on the next call, no restart.
 Each role (`concept`, `builder`, `critic`, `image`) can use a different provider.
@@ -21,7 +42,7 @@ Model names are yours to set; check each provider's current model list.
 ## No API keys? Use your own assistant
 Two keyless text providers mean the AI you are already talking to does the work:
 
-- `session` — the server asks your host (Cursor, Freebuff, Claude Code) to answer via MCP sampling. Automatic, but the host must support the sampling capability. Copy `design-mcp.config.session.example.json` to `design-mcp.config.json` in your project. If the host refuses, the error tells you to use `manual`.
+- `session` — the server asks your host (Cursor, Freebuff, Claude Code) to answer via MCP sampling. Automatic, but the host must support the sampling capability. Copy `design-mcp.config.session.example.json` to `design-mcp.config.json` in your project. A host that does not advertise sampling is refused **before anything is sent**, naming both ways out; a host that advertises it and then never answers fails at `host.samplingTimeoutSec` (default 300 s) instead of leaving the call pending forever. (It really did hang: a mission sat on its leader plan for hours with every surface saying RUNNING, because MCP gives a sampling request no deadline.)
 - `manual` — works with any host. The pipeline parks each prompt at `.design-mcp/manual/pending-<id>.json` and stops with instructions. You (or your assistant) read the file, reply with `manual_answer { id, text }`, and re-run the original tool call; stored answers resume the pipeline automatically. Copy `design-mcp.config.manual.example.json` to start. `manual_pending` lists what still needs an answer.
 
 The `image` role has no keyless option (sampling carries text, not image output). Without an image key the builder notes it and draws everything in SVG/CSS, which the planner already prefers.
@@ -47,9 +68,30 @@ answered and stops at the next unanswered prompt instead of starting over. Keep 
 `units: 1` and `peer: false` cut a mission to three prompts.
 
 ## Test it
-No API keys needed: `npm run build && npm test` runs two harnesses — the stdio smoke suite (290 checks) and `smoke/arithmetic.mjs`, which drives the built modules directly (104 checks) — 394 in all: tool/resource/prompt inventory, the playbook tools, config report, brief create/validate/never-overwrite, the codebase layer against a fixture repo including a tsconfig alias that must resolve to a real file, the reference lookup (a declaration with its kind and export status, every use with its line, a use reached through a tsconfig alias, a name used but never declared, a name nothing mentions, a mention in a document labelled as a mention rather than a call), the edit gate against a fixture whose import graph is known (an anchor that is really there, one that is real but cited at stale lines, one that occurs three times, a line range past the end of the file, a path the leader invented, a path outside the project, an edit in a file the index skipped, the call sites named for an identifier anchor, and the snapshot hash each line number belongs to), the collective's repair pass, its computed verdict and the grade arithmetic behind it (a clean run grades `STRONG`, one edit that cannot be applied or one closing sentence that still contradicts the record stops that, and a claim the repair pass re-cited or withdrew no longer holds the run down), the conclusion gate turning an armed closing paragraph into two flagged sentences and the conclusion repair pass settling them one way each, its round-two conversation and its memory — including one invented quote that must be rejected and then repaired, withdrawn or left unaddressed by three different units, an unevidenced rebuttal that must be marked unproven, a memory entry whose code changed and must retire itself, and the session-install block covering each host's own instruction file — one file per host family, the host's own text never touched, and a removal that cleans every file it wrote — and every graceful error path).
+No API keys needed: `npm run build && npm test` runs two harnesses — the stdio smoke suite (298 checks) and `smoke/arithmetic.mjs`, which drives the built modules directly (134 checks) — 432 in all: tool/resource/prompt inventory, the playbook tools, config report, brief create/validate/never-overwrite, the codebase layer against a fixture repo including a tsconfig alias that must resolve to a real file, the reference lookup (a declaration with its kind and export status, every use with its line, a use reached through a tsconfig alias, a name used but never declared, a name nothing mentions, a mention in a document labelled as a mention rather than a call), the edit gate against a fixture whose import graph is known (an anchor that is really there, one that is real but cited at stale lines, one that occurs three times, a line range past the end of the file, a path the leader invented, a path outside the project, an edit in a file the index skipped, the call sites named for an identifier anchor, and the snapshot hash each line number belongs to), the collective's repair pass, its computed verdict and the grade arithmetic behind it (a clean run grades `STRONG`, one edit that cannot be applied or one closing sentence that still contradicts the record stops that, and a claim the repair pass re-cited or withdrew no longer holds the run down), the conclusion gate turning an armed closing paragraph into two flagged sentences and the conclusion repair pass settling them one way each, its round-two conversation and its memory — including one invented quote that must be rejected and then repaired, withdrawn or left unaddressed by three different units, an unevidenced rebuttal that must be marked unproven, a memory entry whose code changed and must retire itself, and the session-install block covering each host's own instruction file — one file per host family, the host's own text never touched, and a removal that cleans every file it wrote — and every graceful error path).
 With keys, in Cursor chat: "run providers_config", then "run providers_test for each role", then "usage_report".
 Or: `npm run inspect`.
+
+## One install, many repositories
+
+The server is meant to be installed once and used from whatever repo you have open — but a stdio server
+only knows the directory it was launched from, and a desktop host often launches it from your home folder.
+That is not cosmetic: it indexes 2,900 files of home as if it were the project, and every citation it
+produces is real text from the wrong tree.
+
+So the project root is resolved in a fixed order, and reported:
+
+| Order | Source | How to use it |
+| --- | --- | --- |
+| 1 | `project_root { path }` | Name the repo in the conversation. Session-scoped: no restart, no config edit, no rebuild. Outranks everything. |
+| 2 | `DESIGN_MCP_PROJECT_DIR` | The env var in the server's MCP settings, for a server that belongs to one repo. |
+| 3 | the host's `roots/list` | The folder the host says it has open, read once after initialize (hosts that advertise the capability). |
+| 4 | the working directory | Walked up to the nearest `.git` / `package.json` / `go.mod` / … so a server started in `repo/src/deep` still indexes `repo`. |
+
+`project_root` with no arguments reports all of this; `providers_config` repeats it next to the provider
+and host-capability report, so "which repo am I on?" always has a cheap answer. If the answer is a home
+folder or a drive root, the codebase and collective tools **refuse** and name the three fixes instead of
+indexing it — an error is better than 2,900 citations that look like answers.
 
 ## Phase 7: the codebase layer and the collective
 
@@ -61,7 +103,13 @@ it is built on one rule: a claim about the code is only real if the server can r
 - `code_index` walks the project into `.design-mcp/codebase/index.json`: files, declarations with real
   line numbers, relative imports (resolved, including TypeScript's `"./x.js"`-for-`x.ts` style), the
   commands that build and test it, its own rule files, entry points and the files most imported by others.
-  It is cached: a repeat call stat-checks the files and reuses it until something actually changes.
+  It is cached, and the cache is verified cheapest-first. On a clean tree git itself answers "nothing moved"
+  in two spawns instead of one stat per file — **359 ms → 43 ms** warm on a 4000-file repo, with only ~10 ms
+  added for a dirty one — once the repo passes `codebase.gitStampMinFiles` (default 300; below that, two
+  spawns cost more than statting a few hundred files, so small repos keep the old path). A dirty tree is
+  never trusted to git's word: its status names the path, not the new contents, so one stat per file
+  decides, and only real byte changes rebuild. A repo where git has been told to look away
+  (`assume-unchanged`, `skip-worktree`) gets no git stamp at all.
 - `code_digest` prints the compact map of all that (~2-3k tokens for a 46-file repo) — what an assistant
   should read instead of opening files at random. The same content is addressable as resources:
   `code://digest`, `code://map`, `code://graph`, `code://conventions` and `code://focus`.
@@ -194,7 +242,7 @@ to `roles.worker` = `session`, so the copies are instances of the model you are 
 API key is needed. Set `roles.leader`/`roles.worker` to a provider to run the collective somewhere else.
 Caps live under `collective` (`maxUnits`, `maxWorkers`, `contextTokensPerWorker`, `synthesize`,
 `repairRound`, `editRepair`, `conclusionRepair`, `peerRound`, `memory`, `memoryItems`, `memoryTokensInPrompt`, `keepDossiers`) and the codebase layer under
-`codebase` (`roots`, `ignore`, `maxFiles`, `maxFileKB`, `digestTokens`, `contextTokens`).
+`codebase` (`roots`, `ignore`, `maxFiles`, `maxFileKB`, `gitStampMinFiles`, `digestTokens`, `contextTokens`).
 
 ### Who they are
 
@@ -327,6 +375,13 @@ local_mode { }                  # status: mode, source, model, per-request value
 - Every dossier carries a **Local delegation** section and the lifetime counters (delegated /
   audit-passed / audit-rejected / fell-back) are reported by `local_mode` and the greeting, so the
   question "is the local model actually saving me time?" has a number under it.
+- **A `:cloud` tag is an Ollama cloud model** — `beam:cloud` is 501B parameters with a 1M context, served
+  on `ollama.com`. Your daemon only proxies it, so moving to it is a `model` change, not a `host` one.
+  Two things follow: `keep_alive` and `num_thread` are not sent (there is no machine of yours to keep
+  warm), and the status line and the flip-on message say plainly that the file slices a delegated unit
+  is given leave this machine. The audit ladder, the import gate and the council review are untouched —
+  where the bytes were generated says nothing about whether they are right. Measured through this
+  transport on the Giya checkout: a full-file JSON reply in 13.4 s.
 
 ## Phase 8: "Hello collective." — and your own skills
 

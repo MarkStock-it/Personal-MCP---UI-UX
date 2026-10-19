@@ -11,8 +11,11 @@
     "build": "tsc",
     "smoke": "node smoke/smoke.mjs && node smoke/arithmetic.mjs",
     "test": "npm run smoke",
-    "dev": "tsx src/index.ts",
+    "serve": "node scripts/serve.mjs",
     "start": "node dist/index.js",
+    "dev": "tsx src/index.ts",
+    "sync": "node tools/autosync.mjs --once",
+    "autosync": "node tools/autosync.mjs",
     "inspect": "npx @modelcontextprotocol/inspector node dist/index.js"
   },
   "dependencies": {

@@ -6,6 +6,7 @@
 // no server in the way. Everything claimed in the docs about the grades is asserted below.
 //
 // Run: npm run build && node smoke/arithmetic.mjs   (also run by `npm run smoke`)
+import { execFile } from "node:child_process";
 import fs from "node:fs/promises";
 import http from "node:http";
 import os from "node:os";
@@ -57,7 +58,7 @@ for (const [rel, text] of Object.entries(FIXTURE)) {
 }
 
 const { loadConfig } = await import(pathToFileURL(path.join(ROOT, "dist", "config.js")).href);
-const { getIndex } = await import(pathToFileURL(path.join(ROOT, "dist", "codebase", "store.js")).href);
+const { getIndex, quickStampFor } = await import(pathToFileURL(path.join(ROOT, "dist", "codebase", "store.js")).href);
 const { verifyEdits, renderEditCheck, mergeEditChecks, EDIT_STATUS_MEANING } = await import(pathToFileURL(path.join(ROOT, "dist", "collective", "edits.js")).href);
 const { missionVerdict } = await import(pathToFileURL(path.join(ROOT, "dist", "collective", "verdict.js")).href);
 const { checkConclusion, applyConclusionFixes, renderConclusionCheck, renderConclusionRepair, splitSentences } = await import(pathToFileURL(path.join(ROOT, "dist", "collective", "conclusion.js")).href);
@@ -325,7 +326,7 @@ check("a corrupt record is treated as nothing learned, not as a broken greeting"
 // cancelled request, a generation the mode switch refused, an invented import — are exercised here
 // against a stub Ollama, with no model and no keys.
 const { health } = await import(pathToFileURL(path.join(ROOT, "dist", "ollama", "client.js")).href);
-const { generate, cancelAll, isSwitchedOff, isTimeout, localCounters } = await import(pathToFileURL(path.join(ROOT, "dist", "ollama", "client.js")).href);
+const { generate, cancelAll, isSwitchedOff, isCloudModel, isTimeout, localCounters } = await import(pathToFileURL(path.join(ROOT, "dist", "ollama", "client.js")).href);
 const { checkImports } = await import(pathToFileURL(path.join(ROOT, "dist", "ollama", "delegate.js")).href);
 const { ConfigSchema } = await import(pathToFileURL(path.join(ROOT, "dist", "config.js")).href);
 
@@ -334,7 +335,15 @@ const localCfg = ConfigSchema.parse({}).local;
 const arithOllama = http.createServer((req, res) => {
   if (req.url === "/api/tags") {
     res.setHeader("content-type", "application/json");
-    res.end(JSON.stringify({ models: [{ name: "stub-coder:latest" }] }));
+    // A pulled local tag and a cloud model as a real daemon reports them: no size, remote_host set.
+    res.end(
+      JSON.stringify({
+        models: [
+          { name: "stub-coder:latest", details: { parameter_size: "15.7B" } },
+          { name: "beam:cloud", remote_host: "https://ollama.com", details: { parameter_size: "501B" } },
+        ],
+      })
+    );
     return;
   }
   // /api/generate never answers here: it exists to exercise the timeout and the switch-off abort.
@@ -342,6 +351,73 @@ const arithOllama = http.createServer((req, res) => {
 await new Promise((ok) => arithOllama.listen(0, "127.0.0.1", ok));
 const arithPort = arithOllama.address().port;
 const liveSettings = { ...localCfg, host: `http://127.0.0.1:${arithPort}`, timeoutMs: 120000 };
+
+section("the index cache: git may vouch for a clean tree, and never for a dirty one");
+check("outside a git repo there is no git stamp, so the per-file stamp decides", (await quickStampFor(tmp, config.codebase)) === null, "quickStampFor");
+
+// The fast path is off below `codebase.gitStampMinFiles` files on purpose (two spawns cost more than
+// statting a few hundred files), so the fixture lowers the threshold to 1 and the fast path is what runs.
+const gitRepo = await fs.mkdtemp(path.join(os.tmpdir(), "design-mcp-gitstamp-"));
+const git = (args) =>
+  new Promise((res) =>
+    execFile(
+      "git",
+      args,
+      { cwd: gitRepo, env: { ...process.env, GIT_AUTHOR_NAME: "t", GIT_AUTHOR_EMAIL: "t@example.com", GIT_COMMITTER_NAME: "t", GIT_COMMITTER_EMAIL: "t@example.com" } },
+      (e, out) => res({ code: e ? 1 : 0, out: String(out ?? "") })
+    )
+  );
+// The server keeps its cache in .design-mcp/, which every real project should ignore — the fixture does, so
+// the state dir cannot be what keeps the tree dirty.
+await fs.writeFile(path.join(gitRepo, ".gitignore"), ".design-mcp/\n");
+await fs.writeFile(path.join(gitRepo, "a.ts"), "export const a = 1;\n");
+await fs.writeFile(path.join(gitRepo, "gone.ts"), "export const gone = 1;\nexport const stay = 2;\n");
+await git(["init", "-q"]);
+await git(["add", "-A"]);
+await git(["commit", "-qm", "init"]);
+const fastCfg = { ...config.codebase, gitStampMinFiles: 1 };
+const cold = await getIndex(gitRepo, fastCfg, {});
+check("a first read builds the index and records the git stamp for the clean tree", !cold.cached && cold.via === "build" && typeof cold.index.quickStamp === "string", JSON.stringify({ cached: cold.cached, via: cold.via, quick: cold.index.quickStamp }));
+const warm = await getIndex(gitRepo, fastCfg, {});
+check("on a clean tree at the same HEAD the cache is verified by git, not by statting every file", warm.cached && warm.via === "quick", JSON.stringify({ cached: warm.cached, via: warm.via, ms: warm.stampMs }));
+// The reason the fast path is clean-tree-only: git's status line names the path, not the bytes, so two
+// different edits to one file look identical to it. Serving the second one from cache would be a stale index.
+await fs.writeFile(path.join(gitRepo, "a.ts"), "export const a = 2;\nexport const b = 3;\n");
+const dirty = await getIndex(gitRepo, fastCfg, {});
+check("an edit is never served from the cache, even though both edits look the same to git status", !dirty.cached && dirty.index.files.some((f) => f.path === "a.ts" && f.symbols.some((s) => s.name === "b")), JSON.stringify({ cached: dirty.cached, via: dirty.via }));
+await git(["add", "-A"]);
+await git(["commit", "-qm", "edit"]);
+const afterCommit = await getIndex(gitRepo, fastCfg, {});
+check("a commit re-verifies once, then git carries the cache again", afterCommit.cached && (await getIndex(gitRepo, fastCfg, {})).via === "quick", JSON.stringify({ cached: afterCommit.cached, via: afterCommit.via }));
+await fs.rm(path.join(gitRepo, "gone.ts"));
+const removed = await getIndex(gitRepo, fastCfg, {});
+check("a deleted file is never served from the cache either", !removed.cached && !removed.index.files.some((f) => f.path === "gone.ts"), JSON.stringify({ cached: removed.cached, files: removed.index.files.map((f) => f.path) }));
+
+// `skip-worktree` makes git report a clean tree no matter what a file contains. A repo with one must get no
+// git stamp at all, or the cache would keep serving bytes nobody can see changed.
+await fs.writeFile(path.join(gitRepo, "a.ts"), "export const a = 4;\n");
+await git(["add", "-A"]);
+await git(["commit", "-qm", "before the flag"]);
+await git(["update-index", "--skip-worktree", "a.ts"]);
+await getIndex(gitRepo, fastCfg, {}); // record the new bytes once
+const guarded = await getIndex(gitRepo, fastCfg, {});
+check("a repo where git is told to look away from a file gets no git stamp at all", guarded.cached && guarded.index.quickStamp === undefined && guarded.via === "stat", JSON.stringify({ cached: guarded.cached, quick: guarded.index.quickStamp, via: guarded.via }));
+await fs.writeFile(path.join(gitRepo, "a.ts"), "export const a = 5;\nexport const c = 6;\n");
+const afterHidden = await getIndex(gitRepo, fastCfg, {});
+check("and the stat pass still catches an edit git refuses to report", !afterHidden.cached && afterHidden.index.files.some((f) => f.path === "a.ts" && f.symbols.some((s) => s.name === "c")), JSON.stringify({ cached: afterHidden.cached, via: afterHidden.via }));
+await git(["update-index", "--no-skip-worktree", "a.ts"]);
+
+// The scanner's containment test used to be a string prefix, which accepts a SIBLING whose name merely
+// starts with the project's — and then cites that project's files as if they were this one's.
+const projParent = await fs.mkdtemp(path.join(os.tmpdir(), "design-mcp-sibling-"));
+const own = path.join(projParent, "proj");
+const sibling = path.join(projParent, "proj-old");
+await fs.mkdir(own, { recursive: true });
+await fs.mkdir(sibling, { recursive: true });
+await fs.writeFile(path.join(own, "own.ts"), "export const own = 1;\n");
+await fs.writeFile(path.join(sibling, "secret.ts"), "export const secret = 1;\n");
+const siblingLoad = await getIndex(own, { ...config.codebase, roots: ["../proj-old"] }, {});
+check("a root that is a sibling with a shared prefix is outside the project, not inside it", siblingLoad.index.files.length === 0 && siblingLoad.index.notes.some((n) => /outside the project/.test(n)), JSON.stringify({ files: siblingLoad.index.files.map((f) => f.path), notes: siblingLoad.index.notes }));
 
 section("local delegation: the import/API gate (no model)");
 const goodFile = { path: "src/good.ts", content: 'import { formatMoney } from "./lib/format.js";\nexport const good = (cents: number) => formatMoney(cents, "PHP");\n' };
@@ -358,6 +434,9 @@ check("an unreachable daemon says so, with the detail", !deadHealth.ok && /unrea
 check("a live daemon confirms the model it has is the one configured", liveHealth.ok && liveHealth.models.includes("stub-coder:latest") && !liveHealth.modelMissing, JSON.stringify(liveHealth));
 const wrongModel = await health({ ...localCfg, host: `http://127.0.0.1:${arithPort}`, model: "never:latest" });
 check("a live daemon with the wrong model names it as missing", wrongModel.ok === true && wrongModel.modelMissing === true, JSON.stringify(wrongModel));
+const cloudHealth = await health({ ...localCfg, host: `http://127.0.0.1:${arithPort}`, model: "beam:cloud" });
+check("a cloud model is present and named as remote, with the host that runs it", cloudHealth.ok && !cloudHealth.modelMissing && cloudHealth.remote === "https://ollama.com" && cloudHealth.parameterSize === "501B", JSON.stringify(cloudHealth));
+check("a :cloud tag is known to be a cloud model, a pulled tag is not", isCloudModel("beam:cloud") && !isCloudModel("deepseek-coder-v2:latest") && !isCloudModel("stub-coder:latest"), "isCloudModel");
 
 section("local delegation: timeout, and what switching the mode off does to queued work");
 await (async () => {
@@ -385,6 +464,122 @@ await (async () => {
   check("the refused-while-queued counter moved", localCounters().refused >= 1, JSON.stringify(localCounters()));
   check("a refused generation is not beat to the summary as an error", localCounters().errors === 0 || true, JSON.stringify(localCounters())); // errors count failed HTTP, not the owner's switch
 })();
+
+// ── which repository, when the server is installed once and used from many ──────────────────────────
+// This is the failure that started it: a desktop host launched the server from the home folder, so every
+// codebase tool quietly indexed the whole home directory. The fix is a resolution order plus a refusal, and
+// both are asserted here against the built module rather than described in a comment.
+section("project root: one install, many repos, and never a home folder");
+const project = await import(pathToFileURL(path.join(ROOT, "dist", "project.js")).href);
+const savedEnv = process.env.DESIGN_MCP_PROJECT_DIR;
+const savedCwd = process.cwd();
+
+await fs.mkdir(path.join(tmp, "host-repo", "src", "deep"), { recursive: true });
+await fs.writeFile(path.join(tmp, "host-repo", "package.json"), JSON.stringify({ name: "host-repo" }));
+
+process.env.DESIGN_MCP_PROJECT_DIR = tmp;
+let info = project.projectRootInfo();
+check("an explicitly configured project is used, and named as the source", info.root === tmp && info.source === "DESIGN_MCP_PROJECT_DIR" && !info.tooBroad, JSON.stringify(info));
+
+project.setSessionRoot(path.join(tmp, "host-repo"));
+info = project.projectRootInfo();
+check("a repo named in this session outranks the install-time env var", info.root === path.join(tmp, "host-repo") && /project_root/.test(info.source), JSON.stringify(info));
+project.setSessionRoot(null);
+
+delete process.env.DESIGN_MCP_PROJECT_DIR;
+process.chdir(path.join(tmp, "host-repo", "src", "deep"));
+project.setHostRoot(path.join(tmp, "host-repo"));
+info = project.projectRootInfo();
+check("the folder the host reports as its workspace is used when nothing was pinned", info.root === path.join(tmp, "host-repo") && /host/.test(info.source), JSON.stringify(info));
+
+project.setHostRoot(null);
+info = project.projectRootInfo();
+check("without either, a server started deep inside a repo indexes the repo, not the leaf", info.root === path.join(tmp, "host-repo") && /walked up/.test(info.source), JSON.stringify(info));
+
+process.chdir(os.homedir());
+info = project.projectRootInfo();
+check("a home folder is a location, not a project", info.tooBroad === true && /project_root \{ path/.test(info.warning ?? ""), JSON.stringify(info).slice(0, 300));
+let refusedRoot = null;
+try {
+  project.assertUsableRoot(info.root);
+} catch (e) {
+  refusedRoot = e;
+}
+check("reading it as a repository is refused rather than silently indexed", refusedRoot instanceof Error && /not a repository/.test(refusedRoot.message), String(refusedRoot).slice(0, 200));
+let refusedIndex = null;
+try {
+  await getIndex(info.root, loadConfig().config.codebase, {});
+} catch (e) {
+  refusedIndex = e;
+}
+check("and the real read path refuses it too, so no index can be built there", refusedIndex instanceof Error && /not a repository/.test(refusedIndex.message), String(refusedIndex).slice(0, 200));
+
+process.chdir(savedCwd);
+if (savedEnv === undefined) delete process.env.DESIGN_MCP_PROJECT_DIR;
+else process.env.DESIGN_MCP_PROJECT_DIR = savedEnv;
+check("the working directory of the process is restored for the rest of the suite", process.cwd() === savedCwd);
+
+// ── sampling: fail fast instead of hanging forever ──────────────────────────────────────────────────
+// MCP gives a sampling request no deadline, so a host that cannot (or will not) answer leaves the call
+// pending and the job RUNNING for as long as the process lives. Both halves of the fix are checked: the
+// capability refusal (instant, nothing sent) and the deadline (bounded, with the elapsed time named).
+section("sampling: refuse a host that cannot answer, fail at a deadline one that will not");
+const sampling = await import(pathToFileURL(path.join(ROOT, "dist", "sampling.js")).href);
+const tenSecondConfig = path.join(tmp, "sampling-10s.json");
+await fs.writeFile(tenSecondConfig, JSON.stringify({ host: { samplingTimeoutSec: 10 } }));
+process.env.DESIGN_MCP_CONFIG = tenSecondConfig;
+
+let sent = 0;
+sampling.setSamplingServer({
+  server: {
+    getClientCapabilities: () => ({ roots: {} }),
+    createMessage: async () => {
+      sent++;
+      return { content: { type: "text", text: "should never be reached" } };
+    },
+  },
+});
+const tNoCap = Date.now();
+let noCapability = null;
+try {
+  await sampling.sampleCompletion({ messages: [{ role: "user", content: "hi" }], maxTokens: 8 });
+} catch (e) {
+  noCapability = e;
+}
+const refusalMs = Date.now() - tNoCap;
+check("a host that does not declare sampling is refused before anything is sent", noCapability instanceof Error && /does not offer it/.test(noCapability.message) && sent === 0, `${noCapability} sent=${sent}`);
+check("...immediately, instead of waiting for an answer that cannot come", refusalMs < 1000, `${refusalMs} ms`);
+check("...and the refusal names both ways out", /answers on its own/.test(noCapability?.message ?? "") && /manual/.test(noCapability?.message ?? ""), String(noCapability).slice(0, 300));
+
+sampling.setSamplingServer({
+  server: { getClientCapabilities: () => ({ sampling: {} }), createMessage: () => new Promise(() => {}) },
+});
+const tDeadline = Date.now();
+let timedOut = null;
+try {
+  await sampling.sampleCompletion({ messages: [{ role: "user", content: "hi" }], maxTokens: 8 });
+} catch (e) {
+  timedOut = e;
+}
+const waitedMs = Date.now() - tDeadline;
+check("a host that accepts and never answers fails at host.samplingTimeoutSec", timedOut instanceof Error && /did not answer within 10s/.test(timedOut.message), String(timedOut).slice(0, 240));
+check("...at the deadline, not before and not never", waitedMs >= 9_000 && waitedMs < 20_000, `${waitedMs} ms`);
+check("...and the deadline is its own message, not a protocol error", timedOut instanceof Error && !/does not offer it/.test(timedOut.message), String(timedOut).slice(0, 200));
+
+delete process.env.DESIGN_MCP_CONFIG;
+
+// ── jobs: a silent job is reported as stalled, not left as RUNNING ─────────────────────────────────
+section("jobs: a job that stops talking is named stalled");
+const jobs = await import(pathToFileURL(path.join(ROOT, "dist", "jobs.js")).href);
+const quiet = jobs.startJob("stall", () => new Promise(() => {}));
+await new Promise((r) => setTimeout(r, 1200));
+check("a running job that has said nothing is stalled once the threshold passes", jobs.jobIsStalled(quiet, 1) === true, JSON.stringify({ idle: jobs.jobIdleSeconds(quiet), status: quiet.status }));
+check("...and not before it", jobs.jobIsStalled(quiet, 600) === false);
+check("its status stays running, because nothing here can kill a model call", quiet.status === "running");
+const finished = jobs.startJob("done", async () => "ok");
+await new Promise((r) => setTimeout(r, 80));
+check("a finished job is never reported stalled", finished.status === "done" && jobs.jobIsStalled(finished, 0) === false, finished.status);
+check("the idle time is worded for a status line", jobs.humanAge(5) === "5s" && jobs.humanAge(61) === "1m 1s" && jobs.humanAge(3720) === "1h 2m", `${jobs.humanAge(5)}/${jobs.humanAge(61)}/${jobs.humanAge(3720)}`);
 
 await fs.rm(tmp, { recursive: true, force: true }).catch(() => {});
 console.log(failures ? `\nARITHMETIC FAIL: ${failures} check(s)` : "\nARITHMETIC PASS");

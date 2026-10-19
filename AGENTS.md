@@ -8,10 +8,13 @@ Node >= 20, TypeScript, ESM. `dist/` is committed because the host runs `dist/in
 ```bash
 npm install
 npm run build          # tsc -> dist/
-npm test               # 394-check keyless gate: smoke/smoke.mjs (290, stdio suite) + smoke/arithmetic.mjs (104, the built modules driven directly); no API keys needed
+npm test               # 432-check keyless gate: smoke/smoke.mjs (298, stdio suite) + smoke/arithmetic.mjs (134, the built modules driven directly); no API keys needed
 DESIGN_MCP_PROJECT_DIR=<dir> node smoke/call.mjs <tool> '[json]'   # call one tool
 npm run inspect        # MCP inspector
 npx tsx tools/lab/run.ts   # the memory experiment; see tools/lab/README.md (not a gate)
+npm run serve          # the launcher the MCP host runs: rebuild a stale dist, then start the server
+npm run sync           # build + gate + commit + push, once (what `autosync` does on a change)
+npm run autosync       # the same, watching src/smoke/tools/scripts and the docs until stopped
 ```
 `npm test` is the gate: it asserts the tool/resource/prompt inventory, the playbook tools, the
 deterministic checks, the codebase layer against a fixture repo (including a tsconfig alias that must come
@@ -29,32 +32,54 @@ fixture SKILL.md that must be found, read, and pasted into exactly the worker th
 edit gate over the edits those missions proposed (an invented file, a real anchor cited at stale lines, an
 anchor that occurs three times, the snapshot hash, the closing plan's own steps), the session-block
 installer (idempotent, and it must not touch text outside its markers), and every graceful
-error path. `smoke/arithmetic.mjs` (104 checks) then drives the built edit gate, the built merge and the built verdict directly, because
+error path. `smoke/arithmetic.mjs` (115 checks) then drives the built index cache, the built edit gate, the built merge and the built verdict directly, because
 neither is reachable through a mission at reasonable cost: the full status matrix (anchored, stale,
 ambiguous, not found, out of range, missing, refused, unindexed, and the import-graph impact behind each)
 and every grade rule (a clean run is `STRONG`; one unapplicable edit, one wrong citation, one thin quote, one
 silent unit, no closing pass or one sentence of that paragraph that still contradicts the record are each
 enough to stop it, and a step that was re-placed by the edit repair pass or a sentence the conclusion pass
-rewrote to stand on the record stops counting). It must all pass — 394/394 (290 + 104) — before
+rewrote to stand on the record stops counting). It must all pass — 405/405 (290 + 115) — before
 any change is called done.
 
 ## Map
-- `src/index.ts` — the MCP surface: 15 generating/testing tools, 6 playbook tools, 10 codebase/collective
-  tools (code_index, code_digest, code_context, code_refs, code_verify_cites, code_verify_edits, collective_plan, collective_run,
-  collective_report, collective_memory), 4 session/skill tools (collective_hello, collective_install,
-  skills_list, skills_read), 1 local-delegation tool (local_mode), 11 `design://` + 7 `code://`
+- `src/index.ts` — the MCP surface: 37 tools — 15 generating/testing, 6 playbook, 10 codebase/collective
+  (code_index, code_digest, code_context, code_refs, code_verify_cites, code_verify_edits, collective_plan, collective_run,
+  collective_report, collective_memory), 5 session/skill (collective_hello, collective_install, skills_list,
+  skills_read, project_root), 1 local-delegation (local_mode) — 11 `design://` + 7 `code://`
   resources, 5 prompts. Registered at the bottom; the codebase, collective and local_mode blocks are
-  clearly marked. The smoke suite asserts these counts, so adding a tool means updating it as well as
-  this line.
+  clearly marked. The smoke suite asserts this count from its own list (a hardcoded label has drifted
+  twice), so adding a tool means adding it there too.
+- `src/project.ts` — which repository this session is working on, and the refusal when the answer is a
+  home folder. **Read its header before changing the resolution order.** One install of this server is
+  used from many repos, and the host's launch directory is not the repo: `project_root` ->
+  `DESIGN_MCP_PROJECT_DIR` -> the host's `roots/list` -> the working directory walked up to its repo
+  marker. The refusal is load-bearing: indexing a home directory produced 2,900 plausible citations
+  from the wrong tree, which is worse than an error because every one of them looked like an answer.
+- `scripts/serve.mjs` — the entry point the host should run instead of `dist/index.js`: it rebuilds when
+  any `.ts` is newer than the newest emitted file, then hands stdio to the server. Nothing here writes to
+  stdout (it carries the protocol), a failed build still starts the last good build and says so, and the
+  child keeps the host's working directory — the launcher builds in the repo, but it must not rewrite the
+  cwd that project-root resolution rung 4 reads.
+- `tools/autosync.mjs` — `npm run autosync`: watch the source, then build, gate, commit and push. Only
+  known paths are staged (`git add -u` plus explicit directories), a failing build or gate commits
+  nothing, and a failed push leaves the commit local and says so. Read its header before loosening any
+  of those three rules.
 - `src/codebase/` — ground truth about the repo, computed from the files, no model involved. `symbols.ts`
   extracts declarations and imports (**read the header before changing it**: line-oriented comment
   stripping and span rules exist because two real bugs came from getting them wrong), `scan.ts` lists and
-  reads files (git ls-files so `.gitignore` decides, walk otherwise) and detects conventions, `store.ts`  is the cached index + digest/map/graph/conventions renderers, `pack.ts` turns a question into
+  reads files (git ls-files so `.gitignore` decides, walk otherwise) and detects conventions, `store.ts`
+  is the cached index + digest/map/graph/conventions renderers, `pack.ts` turns a question into
   token-budgeted source slices with the file's own line numbers, and `refs.ts` answers "who declares this
   name, who uses it" with a word-boundary text scan (`code_refs`) plus the bounded rename surface the edit
   gate uses. Read its header before trusting it as more than a scan: it counts a match in a comment, a
   string or an unrelated same-named local, and it cannot see a dynamic reference — never present it as
   semantic analysis, and never let anything rename or delete on its word alone.
+- `src/codebase/store.ts` — the index cache is verified **cheapest-first**: for a clean tree above
+  `codebase.gitStampMinFiles` (default 300) git itself answers "nothing moved" in two spawns (359 ms → 43 ms
+  warm on a 4000-file repo, +10 ms on a dirty one), then one stat per file decides for a dirty tree, and only
+  real byte changes rebuild. Read `quickStampFor`'s header before widening it: git's status names a path, not
+  the bytes, so a dirty tree is never trusted to it, and a repo with `assume-unchanged`/`skip-worktree` files
+  gets no git stamp at all.
 - `src/collective/edits.ts` — the edit gate: the same re-read-the-file suspicion as `verify.ts`, pointed at
 the edits a mission proposes instead of the claims it makes. Read its header before widening it: line
 numbers belong to the snapshot it records, an ambiguous anchor is not placed, and the import-graph impact
@@ -117,6 +142,20 @@ distinct: rewritten-and-re-checked, or given up with a reason that is shown next
   `jobs.ts`, `brief.ts`) — the existing generate-and-test pipeline.
 - `src/test/gates.ts` — the real automated gates. **Any threshold stated in `src/playbook/floor.ts` must
   match the numbers here and the budgets in `src/config.ts`.** If they disagree, fix the playbook.
+
+## What this server expects of its host
+- **Every host answer has a deadline.** `host.samplingTimeoutSec` (default 300) bounds one sampling reply,
+  and a client that never advertised the capability is refused before the request is sent (`sampling.ts`).
+  Both exist because MCP gives sampling no deadline at all: one mission sat on its leader plan for hours
+  while `design_status` said RUNNING, and the only thing that ever ended it was a server restart. Do not
+  remove the capability check on the grounds that the timeout catches it — the check is what turns a
+  five-minute hang into an instant, actionable error.
+- **A silent job is named.** `design_status` reports a running job whose log has not moved for
+  `host.stallSeconds` (default 90) as STALLED, with the last line it managed. It cannot kill the call
+  (there is nothing here to kill); it stops the status line from lying.
+- **The project root is a decision, not an assumption.** See `src/project.ts`: a session `project_root`
+  call, then `DESIGN_MCP_PROJECT_DIR`, then the host's `roots/list`, then the working directory walked up
+  to its repo marker. The guard that refuses a home folder is the point, not a nicety.
 
 ## Scroll scenes (the one moment driven by scroll)
 `sequence_extract` turns a local video into the asset a scroll scene needs: evenly sampled frames, a
@@ -213,6 +252,15 @@ off the workflow is byte-identical to before it existed — zero Ollama calls, n
 - The model is a config value (`local.model`) and a flip-time override — swap it for qwen2.5-coder and
   A/B without touching code. Ollama's own env (`OLLAMA_NUM_PARALLEL`, `OLLAMA_MAX_LOADED_MODELS`)
   belong to the daemon, not to this server; the config notes them.
+- **A `:cloud` tag is an Ollama cloud model, and "local" is then only a routing mode.** `beam:cloud`
+  (501B, 1M context) runs on `ollama.com`; the daemon at `local.host` proxies it, so the host stays the
+  same and only `model` changes. `isCloudModel` is the one predicate for this. Three rules go with it:
+  `keep_alive` and `num_thread` describe a machine the owner has, so they are not sent to a cloud model;
+  the status line and the flip-on message say out loud that the file slices leave the machine, because
+  the private-by-default promise is exactly what a remote model breaks; and the audit ladder, the import
+  gate and the council review are unchanged, since nothing about where the bytes were generated says
+  whether they are right. `health` reports `remote`/`parameterSize` from `/api/tags` (`remote_host`, no
+  local size), so a cloud model is never mistaken for a missing one.
 
 ## Round two, and what the copies remember
 - Round two (`collective.peerRound`, one extra model call per unit) exchanges **verified findings only** —

@@ -1,3 +1,8 @@
+/**
+ * An Ollama cloud model — `beam:cloud` runs on ollama.com and the local daemon only proxies it.
+ * Kept as one predicate so the transport, the status line and the flip message cannot disagree.
+ */
+export const isCloudModel = (model) => /[:-]cloud$/i.test(model);
 export const settingsFor = (local) => ({
     host: local.host.replace(/\/$/, ""),
     model: local.model,
@@ -44,11 +49,16 @@ export async function health(settings, timeoutMs = 8000) {
         if (!res.ok)
             return { ok: false, models: [], detail: `Ollama answered ${res.status} ${res.statusText} — is the daemon healthy?` };
         const body = (await res.json());
-        const models = (body.models ?? []).map((m) => m.name ?? "").filter(Boolean);
+        const entries = body.models ?? [];
+        const models = entries.map((m) => m.name ?? "").filter(Boolean);
+        const match = entries.find((m) => m.name === settings.model) ??
+            entries.find((m) => m.name?.split(":")[0] === settings.model.split(":")[0]);
         return {
             ok: true,
             models,
-            modelMissing: !models.some((n) => n === settings.model || n.split(":")[0] === settings.model.split(":")[0]),
+            modelMissing: !match,
+            ...(match?.remote_host ? { remote: match.remote_host } : {}),
+            ...(match?.details?.parameter_size ? { parameterSize: match.details.parameter_size } : {}),
         };
     }
     catch (e) {
@@ -108,6 +118,9 @@ export async function generate(settings, req, log) {
                 throw new RequestCancelled("switched-off");
             inFlight.add(controller);
             try {
+                // keep_alive and num_thread describe hardware this server owns. A cloud model runs on
+                // ollama.com, so sending them would describe a machine we cannot see; they are left out.
+                const cloud = isCloudModel(settings.model);
                 const res = await fetch(`${settings.host}/api/generate`, {
                     method: "POST",
                     headers: { "content-type": "application/json" },
@@ -117,11 +130,11 @@ export async function generate(settings, req, log) {
                         ...(req.system ? { system: req.system } : {}),
                         stream: false,
                         format: "json",
-                        keep_alive: `${settings.keepAliveM}m`,
+                        ...(cloud ? {} : { keep_alive: `${settings.keepAliveM}m` }),
                         options: {
                             temperature: settings.temperature,
                             num_ctx: settings.numCtx,
-                            num_thread: settings.numThread,
+                            ...(cloud ? {} : { num_thread: settings.numThread }),
                             num_predict: settings.maxOutputTokens,
                         },
                     }),

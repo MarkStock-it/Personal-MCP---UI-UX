@@ -38,6 +38,7 @@
  */
 import fs from "node:fs/promises";
 import path from "node:path";
+import { assertUsableRoot } from "../project.js";
 export const BLOCK_START = "<!-- design-mcp:collective:start -->";
 export const BLOCK_END = "<!-- design-mcp:collective:end -->";
 /** The instruction files a host reads on its own, grouped into families so only one per family is written. */
@@ -144,6 +145,9 @@ export async function planTargets(root, opts = {}) {
 }
 /** `dry` reports what it would do and writes nothing — how action=show stays honest. */
 export async function installSessionBlock(root, opts = {}) {
+    // Writing an instruction block into a home folder would put a session-start instruction into every
+    // unrelated project the owner opens. The root has to be a repo, or this does nothing.
+    assertUsableRoot(root);
     const block = sessionBlock();
     const { files, uncovered } = await planTargets(root, { targets: opts.targets, create: opts.create });
     const out = [];
@@ -173,6 +177,7 @@ export async function installSessionBlock(root, opts = {}) {
     return { results: out, uncovered };
 }
 export async function removeSessionBlock(root, opts = {}) {
+    assertUsableRoot(root);
     const wanted = opts.targets?.length ? opts.targets : INSTRUCTION_TARGETS.map((t) => t.path);
     const out = [];
     for (const rel of wanted) {

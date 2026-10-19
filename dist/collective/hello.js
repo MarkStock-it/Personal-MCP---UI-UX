@@ -19,6 +19,7 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import { readLocalState, renderLocalStatus } from "../ollama/state.js";
 import { estimateTokens, getIndex, renderDigest } from "../codebase/store.js";
+import { assertUsableRoot, projectRootInfo } from "../project.js";
 import { run } from "../util/exec.js";
 import { loadMemory } from "./memory.js";
 import { loadOwner, renderOwnerSection } from "./owner.js";
@@ -46,7 +47,8 @@ async function lastMissions(root, want) {
     return out;
 }
 async function gitState(root) {
-    const r = await run("git", ["status", "--porcelain=v1", "--branch"], root, 6000);
+    // git is a real executable, so it runs without a shell: the arguments stay arguments.
+    const r = await run("git", ["status", "--porcelain=v1", "--branch"], root, 6000, { shell: false });
     if (r.code !== 0)
         return "(not a git repository, or git is unavailable — nothing else here depends on it)";
     const lines = r.out.split("\n").filter(Boolean);
@@ -60,6 +62,7 @@ async function gitState(root) {
 }
 export async function helloCollective(projectRoot, cfg, opts = {}) {
     const t0 = Date.now();
+    assertUsableRoot(projectRoot);
     const loaded = await getIndex(projectRoot, cfg.codebase, {});
     const index = loaded.index;
     const budget = Math.min(opts.budgetTokens ?? 1100, cfg.codebase.digestTokens);
@@ -81,8 +84,8 @@ export async function helloCollective(projectRoot, cfg, opts = {}) {
     }
     const lines = [
         `# The collective is here — ${index.name}`,
-        `${index.totals.files} files, ${index.totals.lines} lines, root ${index.root}`,
-        `index: ${loaded.cached ? "cache re-verified, nothing changed since the last mission" : `built in ${index.buildMs} ms`} · git: ${git}`,
+        `${index.totals.files} files, ${index.totals.lines} lines, root ${index.root} — from ${projectRootInfo().root === index.root ? projectRootInfo().source : "the path the caller passed"}`,
+        `index: ${loaded.cached ? (loaded.via === "quick" ? `cache verified by git in ${loaded.stampMs} ms, nothing changed since the last mission` : "cache re-verified, nothing changed since the last mission") : `built in ${index.buildMs} ms`} · git: ${git}`,
         "",
         "## Roll call",
         `${LEADER.handle} (leader) — holds the shape of the job; plans, never reads a file, never writes code.`,

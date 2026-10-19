@@ -1,15 +1,49 @@
 import fs from "node:fs/promises";
 import path from "node:path";
-import { stateDir } from "./config.js";
+import { loadConfig, stateDir } from "./config.js";
 
+/**
+ * Background work, and - since a job that stops talking is indistinguishable from a job that is working
+ * hard - the one number that tells them apart: how long since the last log line.
+ *
+ * A job cannot be cancelled from here (there is no socket to a model call to close), so a stall is
+ * reported rather than killed: `design_status` names the last line it managed and how long ago, which is
+ * enough to tell "still thinking" from "blocked on a host that will never answer". That distinction was
+ * missing when a leader call sat pending for hours and every surface said RUNNING.
+ */
 export interface Job {
   id: string;
   kind: string;
   status: "running" | "done" | "failed" | "interrupted";
   startedAt: string;
+  /** When the job last said anything. Absent in files written before this field existed. */
+  lastActivityAt?: string;
   finishedAt?: string;
   log: string[];
   result?: string;
+}
+
+const since = (iso: string | undefined) => (iso ? Math.max(0, (Date.now() - Date.parse(iso)) / 1000) : Infinity);
+
+/** Seconds since this job last logged (or since it started, if it never logged). */
+export function jobIdleSeconds(job: Job): number {
+  const idle = since(job.lastActivityAt ?? job.startedAt);
+  return Number.isFinite(idle) ? Math.round(idle) : 0;
+}
+
+/** A running job that has said nothing for `stallSec` is stalled, not busy. */
+export function jobIsStalled(job: Job, stallSec?: number): boolean {
+  if (job.status !== "running") return false;
+  const limit = stallSec ?? loadConfig().config.host.stallSeconds;
+  return jobIdleSeconds(job) >= limit;
+}
+
+/** "4m 12s" - short enough to sit in a status line. */
+export function humanAge(sec: number): string {
+  if (sec < 60) return `${sec}s`;
+  const m = Math.floor(sec / 60);
+  if (m < 60) return `${m}m ${sec % 60}s`;
+  return `${Math.floor(m / 60)}h ${m % 60}m`;
 }
 
 const jobs = new Map<string, Job>();
@@ -26,10 +60,12 @@ async function persist(job: Job) {
 
 /** Start a long task in the background. The returned job can be polled. Never throws into the server. */
 export function startJob(kind: string, fn: (log: (m: string) => void) => Promise<string>): Job {
-  const job: Job = { id: `${kind[0]}-${Date.now().toString(36)}`, kind, status: "running", startedAt: new Date().toISOString(), log: [] };
+  const now = new Date().toISOString();
+  const job: Job = { id: `${kind[0]}-${Date.now().toString(36)}`, kind, status: "running", startedAt: now, lastActivityAt: now, log: [] };
   jobs.set(job.id, job);
   const log = (m: string) => {
-    job.log.push(`${new Date().toISOString().slice(11, 19)} ${m}`);
+    job.lastActivityAt = new Date().toISOString();
+    job.log.push(`${job.lastActivityAt.slice(11, 19)} ${m}`);
     if (job.log.length > 300) job.log.splice(0, job.log.length - 300);
     void persist(job);
   };
@@ -46,6 +82,7 @@ export function startJob(kind: string, fn: (log: (m: string) => void) => Promise
     })
     .finally(() => {
       job.finishedAt = new Date().toISOString();
+      job.lastActivityAt = job.finishedAt;
       void persist(job);
     });
   return job;

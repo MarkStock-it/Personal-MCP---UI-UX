@@ -255,7 +255,8 @@ client.setRequestHandler(CreateMessageRequestSchema, async (req) => {
   if (/REPAIR PASS/.test(prompt)) return answer(JSON.stringify(repairAnswer(unit?.[1] ?? "explore-util")));
   // The council spec review of LOCAL output: the audit ladder's last step, one call, pass/fail by decision.
   // The suite's deterministic failure path comes from the import check, so this review passes when it runs.
-  if (/review code a small local model wrote/.test(prompt)) return answer(JSON.stringify({ decision: "pass", issues: [] }));
+  // The prompt now names the model it is reviewing (stub-coder:latest here, which is not a cloud tag).
+  if (/You review code a small local model \(stub-coder:latest\) wrote\./.test(prompt)) return answer(JSON.stringify({ decision: "pass", issues: [] }));
   if (/now reading what the other copies of yourself found/.test(prompt)) return answer(JSON.stringify(peerResponse(unit?.[1] ?? "explore-util")));
   if (unit) return answer(JSON.stringify(workerReport(unit[1])));
   // The LOCAL mission's plan: an implementer unit explicitly offered to the local model ("local": true)
@@ -322,12 +323,13 @@ try {
     "antislop_check", "critique_rubric", "design_playbook", "motion_pattern", "palette_check", "playbook_topics",
     // the codebase layer (ground truth, no model) and the collective
     "code_index", "code_digest", "code_context", "code_refs", "code_verify_cites", "code_verify_edits", "collective_plan", "collective_run", "collective_report", "collective_memory",
-    // waking the collective, and the owner's own skills
-    "collective_hello", "collective_install", "skills_list", "skills_read",
+    // waking the collective, the owner's own skills, and which repo this session is actually on
+    "collective_hello", "collective_install", "skills_list", "skills_read", "project_root",
     // the optional local-model delegation (off by default: zero Ollama calls until local_mode flips it on)
     "local_mode",
   ];
-  check(`34 tools registered (${names.length} found)`, names.length === expected.length, names.join(","));
+  // Computed, not typed: a hardcoded number in this label has already drifted from the list twice.
+  check(`${expected.length} tools registered (${names.length} found)`, names.length === expected.length, names.join(","));
   check("all expected tools present", expected.every((n) => names.includes(n)));
 
   console.log("== resources + prompts (the playbook is addressable, not only callable) ==");
@@ -438,6 +440,30 @@ try {
   check("no error", !cfg.error);
   check("reports defaults source", cfg.text.includes("built-in defaults"));
   check("reports key status", /MISSING/.test(cfg.text));
+  check("says which repo it is on, and where that came from", cfg.text.includes(`Project dir: ${tmp}`) && cfg.text.includes("Root from: DESIGN_MCP_PROJECT_DIR"), cfg.text.slice(0, 300));
+  check("says whether this host can answer sampling at all", /sampling: supported/.test(cfg.text), cfg.text.slice(0, 400));
+
+  console.log("== which repository (one install, any repo) ==");
+  const here = await call("project_root");
+  check("project_root names the pinned repo, and why it is that one", !here.error && here.text.includes(`Project: ${tmp}`) && here.text.includes("From: DESIGN_MCP_PROJECT_DIR"), here.text.slice(0, 300));
+  const home = await call("project_root", { path: os.homedir() });
+  check("a home folder is refused as a project, with the reason", home.error && /home folder or a drive root/.test(home.text), home.text.slice(0, 200));
+  const stillHere = await call("code_index", { refresh: true });
+  check("after that refusal the index still reads the fixture, not the home folder", !stillHere.error && /src\/util\.ts/.test(stillHere.text), stillHere.text.slice(0, 300));
+
+  // A second repo, reached without restarting the server or editing its settings: this is the whole point
+  // of the tool for someone who installed the server once and works in many folders.
+  const other = await fs.mkdtemp(path.join(os.tmpdir(), "design-mcp-other-repo-"));
+  await fs.mkdir(path.join(other, "src"), { recursive: true });
+  await fs.writeFile(path.join(other, "package.json"), JSON.stringify({ name: "other-repo", type: "module" }));
+  await fs.writeFile(path.join(other, "src/only.ts"), 'export const onlyHere = (): string => "second repo";\n');
+  const moved = await call("project_root", { path: other });
+  check("project_root moves this session to another repo", !moved.error && moved.text.includes(`Project: ${other}`), moved.text.slice(0, 300));
+  const otherIndex = await call("code_index");
+  check("the index follows the move, with that repo's own files", otherIndex.text.includes("src/only.ts") && otherIndex.text.includes("onlyHere"), otherIndex.text.slice(0, 400));
+  const backHere = await call("project_root", { path: tmp });
+  check("and back, so the rest of the suite still runs on the fixture", !backHere.error && backHere.text.includes(`Project: ${tmp}`), backHere.text.slice(0, 200));
+  await fs.rm(other, { recursive: true, force: true });
 
   console.log("== brief workflow ==");
   const init = await call("brief_init");

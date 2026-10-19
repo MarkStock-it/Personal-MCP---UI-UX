@@ -1,6 +1,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { z } from "zod";
+import { projectRootInfo } from "./project.js";
 const textRole = z.object({
     // "session" = your AI host answers via MCP sampling (no key). "manual" = prompts are parked as files for you to answer (no key, any host).
     provider: z.enum(["anthropic", "openai", "google", "session", "manual"]),
@@ -45,6 +46,20 @@ export const ConfigSchema = z.object({
         image: imageRole.default({ provider: "openai", model: "gpt-image-1" }),
     })
         .default({}),
+    // What this server expects of its host. Both values exist because MCP has no timeout of its own:
+    // a host that never answers a sampling request leaves that call pending forever, and a job blocked
+    // on it can never fail. These two turn a silent hang into a named failure.
+    host: z
+        .object({
+        // Ceiling for one answer from the host (MCP sampling). The leader's plan call runs through this,
+        // so it is generous — but finite, which is the point.
+        samplingTimeoutSec: z.number().int().min(10).max(1800).default(300),
+        // A background job whose log has not advanced for this long is reported as stalled by design_status.
+        // It cannot be killed from here (there is nothing to kill); it is reported, with the last line it
+        // managed and the call it was waiting on.
+        stallSeconds: z.number().int().min(20).max(3600).default(90),
+    })
+        .default({}),
     limits: z
         .object({
         variations: z.number().int().min(1).max(5).default(3),
@@ -81,6 +96,10 @@ export const ConfigSchema = z.object({
         roots: z.array(z.string()).default(["."]),
         maxFiles: z.number().int().min(1).max(20000).default(4000),
         maxFileKB: z.number().int().min(1).max(2048).default(512),
+        // Above this many indexed files, the cache is verified by asking git whether the tree is clean (two
+        // spawns) instead of statting every file. Below it the stat pass is cheaper than the spawns, so small
+        // repos keep the old path. Measured: ~35 ms for the git check against ~0.1-0.25 ms per statted file.
+        gitStampMinFiles: z.number().int().min(1).max(20000).default(300),
         // Directories never walked, on top of .gitignore (git ls-files already honours that).
         ignore: z.array(z.string()).default(DEFAULT_IGNORE),
         // The compact map of the repo that the leader and the host read instead of the files.
@@ -209,8 +228,13 @@ export const ConfigSchema = z.object({
     })
         .default({}),
 });
+/**
+ * The repository this server is working on. Resolution (env -> host workspace -> working directory,
+ * walked up to its repo root) lives in `project.ts`; read that header before changing this, because
+ * the guard it enforces is the difference between "no project" and "2,900 files of somebody's home".
+ */
 export function projectDir() {
-    return path.resolve(process.env.DESIGN_MCP_PROJECT_DIR ?? process.cwd());
+    return projectRootInfo().root;
 }
 /** Where this tool keeps its own files inside your project. */
 export function stateDir() {

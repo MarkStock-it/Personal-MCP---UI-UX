@@ -8,12 +8,13 @@ import { BRIEF_TEMPLATE, readBrief, resolveInProject, validateBrief } from "./br
 import { archiveStore, hashBrief, loadStore, nextIds, proposeConcepts, renderConcepts, reviseConcept, saveStore } from "./concepts.js";
 import { critiqueVariation } from "./critic.js";
 import { apiKeyFor, keyEnvName, loadConfig, projectDir, providerNeedsKey, stateDir } from "./config.js";
+import { adoptHostRoots, ensureProject, isTooBroad, repoRootOf, setSessionRoot } from "./project.js";
 import { listPending, renderPending, storeAnswer } from "./providers/manual.js";
 import { setSamplingServer } from "./sampling.js";
 import { buildVariation } from "./builder/build.js";
 import { decideStack, detectStack } from "./builder/scaffold.js";
 import { prepareSequence } from "./builder/sequences.js";
-import { getJob, startJob } from "./jobs.js";
+import { getJob, humanAge, jobIdleSeconds, jobIsStalled, startJob } from "./jobs.js";
 import { pLimit } from "./util/limit.js";
 import { findVariations, loadReport, renderReport, testVariation } from "./test/run.js";
 import { generateImage, generateText } from "./providers/index.js";
@@ -30,7 +31,7 @@ import { renderFocusContract } from "./collective/focus.js";
 import { addRuling, clearMemory, loadMemory, renderMemoryReport } from "./collective/memory.js";
 import { LeaderPlanSchema, leaderSystem, leaderUser } from "./collective/roles.js";
 import { helloCollective } from "./collective/hello.js";
-import { cancelAll, health, localCounters, resetWarned, settingsFor } from "./ollama/client.js";
+import { cancelAll, health, isCloudModel, localCounters, resetWarned, settingsFor } from "./ollama/client.js";
 import { effectiveLocal, recordHealth, renderLocalStatus, writeLocalMode } from "./ollama/state.js";
 import { installSessionBlock, removeSessionBlock, renderInstallReport } from "./collective/install.js";
 import { discoverSkills, findSkill, readSkill, renderSkillIndex } from "./skills/index.js";
@@ -39,6 +40,12 @@ import { STATUS_MEANING, SUPPORT_MEANING, renderVerification, verifyCallerClaims
 // NOTE: stdio servers must never write to stdout (it carries the protocol). Log with console.error only.
 const server = new McpServer({ name: "design-mcp", version: "0.9.0" });
 setSamplingServer(server);
+// One request, once the host has initialized: which folder does it have open? A server installed once and
+// used from many repos has no other way to know, and guessing from the working directory is how a desktop
+// host's home folder became "the project". Best-effort by design — a host without roots falls through.
+server.server.oninitialized = () => {
+    void adoptHostRoots(server.server);
+};
 const ok = (text) => ({ content: [{ type: "text", text }] });
 const fail = (e) => ({
     isError: true,
@@ -51,11 +58,24 @@ server.registerTool("providers_config", {
 }, async () => {
     try {
         const { config, source } = loadConfig();
+        const info = await ensureProject();
+        const caps = server.server.getClientCapabilities();
         const keys = ["anthropic", "openai", "google"].map((p) => `${keyEnvName(p)}: ${process.env[keyEnvName(p)] ? "set" : "MISSING"}`);
         const roles = Object.entries(config.roles).map(([r, v]) => `${r.padEnd(8)} -> ${v.provider} / ${v.model}${providerNeedsKey(v.provider) ? "" : " (no key needed)"}`);
+        const sessionRoles = Object.entries(config.roles).filter(([, v]) => v.provider === "session").map(([r]) => r);
         return ok([
-            `Project dir: ${projectDir()}`,
+            `Project dir: ${info.root}`,
+            `Root from: ${info.source}`,
+            ...(info.tooBroad ? ["", info.warning ?? ""] : []),
             `Config: ${source}`,
+            "",
+            "Host:",
+            caps
+                ? caps.sampling
+                    ? `  sampling: supported — ${sessionRoles.length ? `${sessionRoles.join(", ")} can answer through this host` : "no role is using it"}`
+                    : `  sampling: NOT supported — ${sessionRoles.length ? `${sessionRoles.join(", ")} cannot answer here; point them at a key-based provider or at "manual", or every call will fail` : "no role is using it"}`
+                : "  sampling: unknown (the session has not finished initializing yet — call this again)",
+            caps?.roots ? "  roots: advertised (the server uses the folder this host reports as the project)" : "  roots: not advertised (the project comes from DESIGN_MCP_PROJECT_DIR, or the working directory)",
             "",
             "Roles:",
             ...roles,
@@ -65,6 +85,45 @@ server.registerTool("providers_config", {
             "",
             `Limits: ${config.limits.variations} variations, up to ${config.limits.maxFixRounds} fix rounds`,
         ].join("\n"));
+    }
+    catch (e) {
+        return fail(e);
+    }
+});
+server.registerTool("project_root", {
+    title: "Which repository this session is working on",
+    description: "Reports the repository every project-scoped tool reads, and where that answer came from (a path you named, DESIGN_MCP_PROJECT_DIR, the folder the host reported as its workspace, or the working directory). Pass `path` to point this session at a different repository: one install of this server is meant to serve any repo, and a stdio server cannot see which folder you have open unless it is told. The choice is session-scoped — it outranks DESIGN_MCP_PROJECT_DIR, is never written to a config file, and is forgotten when the server restarts. A home folder or a drive root is refused: that is a location, not a repository, and indexing one is how a whole home directory once became \"the project\".",
+    inputSchema: {
+        path: z.string().optional().describe("Absolute path to the repository to use for the rest of this session; omit it to see what is being used now"),
+    },
+}, async ({ path: wanted }) => {
+    try {
+        let changed = "";
+        if (wanted !== undefined) {
+            const abs = path.resolve(wanted);
+            const st = await fs.stat(abs).catch(() => null);
+            if (!st?.isDirectory())
+                return fail(`There is no folder at ${abs}. Pass an absolute path to the repository.`);
+            if (isTooBroad(abs)) {
+                return fail(`${abs} is a home folder or a drive root, not a repository — which is the exact mistake this tool exists to stop. Point at a project folder instead.`);
+            }
+            setSessionRoot(abs);
+            changed = `Now using ${abs} for the rest of this session. Nothing was written to disk, and this outranks DESIGN_MCP_PROJECT_DIR until the server restarts.`;
+        }
+        const info = await ensureProject();
+        const repo = repoRootOf(info.root);
+        const idx = await fs.stat(path.join(info.root, ".design-mcp", "codebase", "index.json")).catch(() => null);
+        return ok([
+            `Project: ${info.root}`,
+            `From: ${info.source}`,
+            `Repository: ${repo ? repo : "no .git / package.json / go.mod here — a folder, not a repository"}`,
+            `Index: ${idx ? `cached, ${Math.round(idx.size / 1024)} KB, written ${new Date(idx.mtimeMs).toISOString()} — read it with code_digest` : "not built yet — run code_index"}`,
+            `State dir: ${path.join(info.root, ".design-mcp")}`,
+            ...(info.tooBroad ? ["", info.warning ?? ""] : []),
+            changed ? `\n${changed}` : "",
+        ]
+            .filter(Boolean)
+            .join("\n"));
     }
     catch (e) {
         return fail(e);
@@ -291,14 +350,25 @@ server.registerTool("design_status", {
         const job = await getJob(job_id);
         if (!job)
             return ok("No jobs found.");
+        const stallSec = loadConfig().config.host.stallSeconds;
+        const idle = jobIdleSeconds(job);
+        const stalled = jobIsStalled(job, stallSec);
         return ok([
             `Job ${job.id} (${job.kind}): ${job.status.toUpperCase()}`,
             `Started ${job.startedAt}${job.finishedAt ? `, finished ${job.finishedAt}` : ""}`,
+            job.status === "running" ? `Last log line ${humanAge(idle)} ago.` : "",
             "",
+            stalled
+                ? [
+                    `STALLED: nothing has been logged for ${humanAge(idle)} (host.stallSeconds is ${stallSec}), so this job is not working — it is waiting.`,
+                    "The usual cause is a model call this host cannot answer (see providers_config: sampling supported?). The call has no deadline of its own, so the job will not fail by itself — restart the server to clear it, and fix the provider before re-running.",
+                    "",
+                ].join("\n")
+                : "",
             "Recent log:",
             ...job.log.slice(-25),
             job.result ? `\nRESULT:\n${job.result}` : "",
-            job.status === "running" ? "\nStill running. Check again in a minute or two." : "",
+            job.status === "running" && !stalled ? "\nStill running. Check again in a minute or two." : "",
         ].join("\n"));
     }
     catch (e) {
@@ -903,10 +973,13 @@ server.registerTool("collective_hello", {
 });
 server.registerTool("local_mode", {
     title: "Local model mode (Ollama) on/off and its status",
-    description: 'With no arguments: the current local-delegation status — on/off, which source set it, the model, host and per-request values, the lifetime counters (delegated / audit-passed / audit-rejected / fell back) and this session\'s transport counters. With { set: "on" }: runs a health check first (Ollama must be reachable and the model must be pulled) and only then flips the mode on; it stays on across server restarts until you flip it off. With { set: "off" }: flips off immediately, aborts the request in flight and refuses every queued local task — those units fall back to the council. Passing model also sets (or swaps, for an A/B test) the model the mode runs on.',
+    description: 'With no arguments: the current local-delegation status — on/off, which source set it, the model, host and per-request values, the lifetime counters (delegated / audit-passed / audit-rejected / fell back) and this session\'s transport counters. With { set: "on" }: runs a health check first (Ollama must be reachable and the model must be pulled) and only then flips the mode on; it stays on across server restarts until you flip it off. With { set: "off" }: flips off immediately, aborts the request in flight and refuses every queued local task — those units fall back to the council. Passing model also sets (or swaps, for an A/B test) the model the mode runs on. A cloud model (any tag ending in :cloud, e.g. beam:cloud) works the same way: your local Ollama daemon proxies it to ollama.com, the status line says so, and the code slices it is sent leave this machine.',
     inputSchema: {
         set: z.enum(["on", "off"]).optional().describe("Flip local delegation on or off at runtime; omit to just read the status"),
-        model: z.string().optional().describe("The Ollama model tag to delegate to, e.g. deepseek-coder-v2:latest or qwen2.5-coder:7b"),
+        model: z
+            .string()
+            .optional()
+            .describe("The Ollama model tag to delegate to, e.g. deepseek-coder-v2:latest, qwen2.5-coder:7b, or a cloud model such as beam:cloud (it runs on ollama.com, proxied by your local daemon)"),
     },
 }, async ({ set, model }) => {
     try {
@@ -932,7 +1005,16 @@ server.registerTool("local_mode", {
             const state = writeLocalMode(root, { on: true, model });
             resetWarned();
             const effModel = state.model ?? local.model; // the effective model, never a bare "undefined"
-            return ok([`Local mode is ON (${effModel}); Ollama answered and the model is present.`, "The leader may mark well-scoped implementer units local; their output is audited (typecheck → lint → tests → import check → council review) before it is kept.", "", renderLocalStatus(root, local)].join("\n"));
+            return ok([
+                `Local mode is ON (${effModel}); Ollama answered and the model is present.`,
+                // A cloud model is the one case where "local" is only a routing mode: say where the code goes.
+                ...(isCloudModel(effModel) || h.remote
+                    ? [`${effModel} is served by ${h.remote ?? "ollama.com"}, not by this machine: the file slices a delegated unit is given are sent there. The audit ladder and the council review still run on what comes back.`]
+                    : []),
+                "The leader may mark well-scoped implementer units local; their output is audited (typecheck → lint → tests → import check → council review) before it is kept.",
+                "",
+                renderLocalStatus(root, local),
+            ].join("\n"));
         }
         const eff = effectiveLocal(root, local);
         const counters = localCounters();
