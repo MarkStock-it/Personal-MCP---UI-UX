@@ -20,6 +20,7 @@ import path from "node:path";
 import { estimateTokens, getIndex, renderDigest } from "../codebase/store.js";
 import { run } from "../util/exec.js";
 import { loadMemory } from "./memory.js";
+import { loadOwner, renderOwnerSection } from "./owner.js";
 import { LEADER, PERSONAS } from "./personas.js";
 import { listDossiers, missionsDir } from "./run.js";
 import { discoverSkills, renderSkillIndex } from "../skills/index.js";
@@ -64,6 +65,8 @@ export async function helloCollective(projectRoot, cfg, opts = {}) {
     const digest = renderDigest(index, { tokens: budget, focus: opts.focus });
     const digestTokens = estimateTokens(digest);
     const memory = cfg.collective.memory ? await loadMemory(projectRoot) : { items: [], stale: [], live: [] };
+    // One small JSON read. Kept out of the digest budget on purpose: this is history, not source.
+    const owner = await loadOwner(projectRoot);
     const missions = await lastMissions(projectRoot, opts.missions ?? 3);
     const git = await gitState(projectRoot);
     let scan = null;
@@ -95,6 +98,8 @@ export async function helloCollective(projectRoot, cfg, opts = {}) {
             ]
             : []),
         "",
+        renderOwnerSection(owner),
+        "",
         "## Open work",
         ...(missions.length
             ? missions.map((m) => `- ${m.id} — ${m.mission}\n    .design-mcp/collective/${m.id}.md${m.grade ? ` · verdict ${m.grade}` : ""}${m.head ? ` · ${m.head}` : ""}`)
@@ -112,6 +117,7 @@ export async function helloCollective(projectRoot, cfg, opts = {}) {
         "4. `code_verify_edits` on the edits before you make them: every path must exist and every anchor must really be in the file at the lines it cites, and it tells you what imports the file you are about to change. An edit anchored to something that is not there is a guess, not a plan.",
         "5. `code_refs { name }` before a rename, a signature change or a deletion: it names every place the name is declared and used, so \"this file imports that one\" is not mistaken for \"this code calls that function\".",
         "6. Implement the smallest correct change, then run this project's own gates and report what you verified by running, what only by reading, and what you did not check.",
+        '7. When the owner states a preference or a rule, record it with `collective_memory { action: "ruling", text }` before acting on it — that is the only way this server learns what they want, and a ruling is permanent.',
         "",
         `## Digest — this repo in ~${digestTokens} tokens (computed from the files, not written by a model)`,
         digest,
@@ -128,6 +134,7 @@ export async function helloCollective(projectRoot, cfg, opts = {}) {
         files: index.totals.files,
         liveMemory: memory.live.length,
         staleMemory: memory.stale.length,
+        ownerMissions: owner.missions,
         skills: scan?.skills.length ?? 0,
         missions: missions.length,
         ms: Date.now() - t0,

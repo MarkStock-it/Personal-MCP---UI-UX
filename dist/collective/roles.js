@@ -158,6 +158,7 @@ export function leaderUser(i) {
         i.paths?.length ? `FILES THE OWNER ALREADY POINTED AT (they are real; put them in some unit's scope): ${i.paths.join(", ")}` : "",
         `You may define at most ${i.maxUnits} units.`,
         i.memory ? `\n${i.memory}` : "",
+        i.owner ? `\n${i.owner}` : "",
         "",
         "=== REPOSITORY DIGEST (computed from the files, not written by a model) ===",
         i.digest,

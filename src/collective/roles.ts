@@ -210,6 +210,8 @@ export interface LeaderUserInput {
   maxUnits: number;
   /** What the collective already established or already got wrong, from earlier missions. */
   memory?: string;
+  /** Durable history of past missions here (owner.ts): counts and hot files, never evidence. */
+  owner?: string;
 }
 
 export function leaderUser(i: LeaderUserInput): string {
@@ -219,6 +221,7 @@ export function leaderUser(i: LeaderUserInput): string {
     i.paths?.length ? `FILES THE OWNER ALREADY POINTED AT (they are real; put them in some unit's scope): ${i.paths.join(", ")}` : "",
     `You may define at most ${i.maxUnits} units.`,
     i.memory ? `\n${i.memory}` : "",
+    i.owner ? `\n${i.owner}` : "",
     "",
     "=== REPOSITORY DIGEST (computed from the files, not written by a model) ===",
     i.digest,

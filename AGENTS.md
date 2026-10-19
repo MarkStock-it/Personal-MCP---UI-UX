@@ -8,7 +8,7 @@ Node >= 20, TypeScript, ESM. `dist/` is committed because the host runs `dist/in
 ```bash
 npm install
 npm run build          # tsc -> dist/
-npm test               # 342-check keyless gate: smoke/smoke.mjs (261, stdio suite) + smoke/arithmetic.mjs (81, the built modules driven directly); no API keys needed
+npm test               # 355-check keyless gate: smoke/smoke.mjs (263, stdio suite) + smoke/arithmetic.mjs (92, the built modules driven directly); no API keys needed
 DESIGN_MCP_PROJECT_DIR=<dir> node smoke/call.mjs <tool> '[json]'   # call one tool
 npm run inspect        # MCP inspector
 npx tsx tools/lab/run.ts   # the memory experiment; see tools/lab/README.md (not a gate)
@@ -35,7 +35,7 @@ ambiguous, not found, out of range, missing, refused, unindexed, and the import-
 and every grade rule (a clean run is `STRONG`; one unapplicable edit, one wrong citation, one thin quote, one
 silent unit, no closing pass or one sentence of that paragraph that still contradicts the record are each
 enough to stop it, and a step that was re-placed by the edit repair pass or a sentence the conclusion pass
-rewrote to stand on the record stops counting). It must all pass — 342/342 (261 + 81) — before
+rewrote to stand on the record stops counting). It must all pass — 355/355 (263 + 92) — before
 any change is called done.
 
 ## Map
@@ -83,7 +83,11 @@ distinct: rewritten-and-re-checked, or given up with a reason that is shown next
   `personas.ts` gives each seat a stance and a voice (Scout/Mason/Wrench/Thorn/Judge, Keystone leads —
   prompt interventions that change what gets said, not independent minds), `peer.ts` is round two where the
   copies read each other's **verified** findings and must answer with evidence, and `memory.ts` is what
-  survives between missions. `hello.ts` is the session greeting ("Hello collective.": one pass, no model,
+  survives between missions. `owner.ts` is the other half of what carries over: deterministic history of the
+  missions run here (counts, grades, the files they kept landing on, the skills that reached a worker),
+  written on the way out, read by the greeting and by the leader, and labelled history rather than
+  evidence. It holds no preferences — those are `ruling` entries in `memory.ts`, in the owner's own words.
+  `hello.ts` is the session greeting ("Hello collective.": one pass, no model,
   ~150 ms, and it must stay that cheap because it runs at the top of every session) and `install.ts` writes
   the marked block that tells a host to call it.
 - `src/skills/` — the owner's installed SKILL.md collections: discovery under the configured roots (a
@@ -194,6 +198,13 @@ stop a superseded step from holding the verdict down.
   `git status`, the skills scan, then the digest — all computed or attributed, no model call, no key. It is
   the answer to a greeting, so it must stay fast and it must not invent work: if the owner only said hello,
   it hands the assistant the facts to say back and one question to ask.
+- The greeting also reads `.design-mcp/collective/owner.json` (one small file, one read, no model): how many
+  missions have run here, what they graded, which files they kept landing on, and which skills actually
+  reached a worker. That record is written at the end of every mission by `owner.ts` and handed to the
+  leader as a labelled history block. Keep it bounded and best-effort — a corrupt or unwritable record must
+  return empty rather than break a greeting or a mission, and nothing in it is ever evidence about the
+  code. The owner's preferences are not stored there: they are `ruling` entries in memory, so there is one
+  place to edit and no second copy to drift.
 - An MCP server cannot open a conversation, so "runs every time I open a session" is carried by
   `collective_install`, which writes a marked block into the instruction files the hosts actually read.
   Which files those are is documented rather than guessed, and the table lives in
@@ -216,6 +227,15 @@ stop a superseded step from holding the verdict down.
   tool that executes whatever a model asks for is a hole in every project this server is pointed at.
 - Default roots cover the Freebuff account skills and the usual project/home skill folders (`skills.roots`
   in the config, `~` allowed). Discovery walks a few directory levels and stops at symlinks.
+- **A host that does not answer MCP sampling can still run a mission, on the `manual` provider.** Freebuff's
+  MCP client is constructed with no capabilities, so `sampling/createMessage` is refused there and
+  `roles.leader`/`roles.worker` = `session` cannot work; Cursor does not grant sampling either. Point those
+  two roles at `manual` and set `DESIGN_MCP_MANUAL_WAIT_MS` (e.g. 1800000) in the server's env, then keep
+  the job's client open: `collective_run` returns a job id, `manual_pending` lists the parked prompt,
+  `manual_answer { id, text }` stores the reply and the waiting job continues, and `design_status` reports
+  the dossier. One answer per model call (plan, each worker, round two, synthesis, any repair pass). This
+  is a host workaround, not a fourth repair pass: never describe it as sampling, and never make it the
+  default where the host does advertise sampling.
 
 ## Adding playbook knowledge
 Every entry carries `sources` with a real URL, the exact licence name and a `change` note. Rules:

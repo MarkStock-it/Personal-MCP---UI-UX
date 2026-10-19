@@ -633,6 +633,11 @@ try {
   check("a second mission runs", /DONE/.test(status2), status2.slice(0, 240));
   check("the ruling reaches the leader and the workers", seenPrompts.some((p) => p.includes("never let the newsletter double-send")), `prompts captured: ${seenPrompts.length}`);
   check("memory is handed over as hints, not as evidence", seenPrompts.some((p) => p.includes("hints, not instructions")) && seenPrompts.some((p) => /re-read the code before relying on any of them/.test(p)));
+  check(
+    "past missions reach the leader as history, not as evidence",
+    seenPrompts.some((p) => p.includes("HOW THIS OWNER HAS WORKED IN THIS REPO") && p.includes("Missions run here:") && p.includes("never evidence about the code")),
+    `prompts captured: ${seenPrompts.length}`
+  );
   check("the second dossier reports what it was given", /were given to this run as hints/.test(status2), status2.slice(0, 400));
   check("an entry confirmed again is recorded as reinforced, not as new", /nothing new, but \d+ earlier entr/.test(status2), status2.slice(0, 400));
   check("memory records nothing the evidence does not back, and says what it left out", /1 verified claim\(s\) were kept out of memory: the quote is real but shares no wording/.test(status2), status2.slice(0, 2500));
@@ -653,7 +658,9 @@ try {
   console.log("== the owner's skills (found, read, and pasted into a worker when a unit is assigned one) ==");
   const skills = await call("skills_list");
   check("skills_list finds the installed skill and its own description", !skills.error && /make-it-fast — A fixture skill\b/.test(skills.text), skills.text.slice(0, 400));
-  check("it says where each skill lives and what goes with it", !skills.error && /SKILL\.md/.test(skills.text) && skills.text.includes(".claude/skills/make-it-fast"), skills.text.slice(0, 400));
+  // Path separators are a platform detail, not a behaviour: Windows returns `.claude\\skills\\...`, and the
+  // assertion is that the skill's own directory is named, so normalise before looking for it.
+  check("it says where each skill lives and what goes with it", !skills.error && /SKILL\.md/.test(skills.text) && skills.text.replace(/\\/g, "/").includes(".claude/skills/make-it-fast"), skills.text.slice(0, 400));
   const skillsQuery = await call("skills_list", { query: "fixture" });
   check("a filtered listing reports the match count", !skillsQuery.error && /matching "fixture" \(1\)/.test(skillsQuery.text), skillsQuery.text.slice(0, 200));
   const noSkills = await call("skills_list", { roots: ["nowhere-at-all"] });
@@ -680,6 +687,11 @@ try {
   check("it names the repo and its size from the index", !hello.error && /\d+ files, \d+ lines, root /.test(hello.text));
   check("it reports the state of the working tree", !hello.error && /git: (not a git repository|.*)/.test(hello.text), hello.text.slice(0, 400));
   check("it says what the collective already knows here", !hello.error && /## What the collective already knows about this repo/.test(hello.text));
+  check(
+    "and what the missions here taught it about the work",
+    !hello.error && /## What I know about you and this work/.test(hello.text) && /\d+ missions? in this repo since \d{4}-\d{2}-\d{2}/.test(hello.text),
+    hello.text.slice(0, 900)
+  );
   check("it names the open missions on disk", !hello.error && /## Open work/.test(hello.text) && /m-[a-z0-9]+ — /.test(hello.text), hello.text.slice(0, 600));
   check("it hands back the verdict each mission counted for itself", !hello.error && /· verdict (STRONG|PARTIAL|THIN|NOTHING)/.test(hello.text), hello.text.slice(0, 900));
   check("it lists the owner's skills", !hello.error && /## Your skills/.test(hello.text) && /make-it-fast/.test(hello.text));

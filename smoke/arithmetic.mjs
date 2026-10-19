@@ -296,6 +296,29 @@ check(
 );
 check("a run whose conclusion never contradicted the record is not judged on it", !/Closing paragraph/.test(grade().lines.join("\n")) && !/closing paragraph the record contradicts/.test(grade().headline));
 
+section("the owner record (what the collective learns between missions)");
+const { loadOwner, recordMission, renderOwnerStats, renderOwnerSection, ownerFile } = await import(pathToFileURL(path.join(ROOT, "dist", "collective", "owner.js")).href);
+const learning = (over) => ({ id: "m-one", mission: "find the money formatter", grade: "strong", units: 2, verified: 4, rejected: 1, files: ["src/lib/format.ts", "src/a.ts"], skills: ["make-it-fast"], ...over });
+const emptyOwner = await loadOwner(tmp);
+check("a project with no history starts at zero rather than inventing one", emptyOwner.missions === 0 && emptyOwner.files.length === 0 && emptyOwner.grades.strong === 0);
+check("and the greeting says so instead of guessing", /Nothing learned yet/.test(renderOwnerSection(emptyOwner)));
+const firstOwner = await recordMission(tmp, learning({}));
+check("a mission is recorded with its own numbers", firstOwner.missions === 1 && firstOwner.grades.strong === 1 && firstOwner.verified === 4 && firstOwner.rejected === 1);
+check("a file counts once per mission, not once per finding", firstOwner.files.find((f) => f.path === "src/lib/format.ts")?.hits === 1);
+const secondOwner = await recordMission(tmp, learning({ id: "m-two", grade: "partial", files: ["src/lib/format.ts"], skills: [] }));
+check("a second mission accumulates instead of replacing the record", secondOwner.missions === 2 && secondOwner.grades.partial === 1 && secondOwner.grades.strong === 1);
+check("a file the work keeps landing on rises to the top", secondOwner.files[0].path === "src/lib/format.ts" && secondOwner.files[0].hits === 2);
+const reloadedOwner = await loadOwner(tmp);
+check("what was learned survives a reload", reloadedOwner.missions === 2 && reloadedOwner.files[0].hits === 2 && reloadedOwner.last?.id === "m-two");
+const ownerBlock = renderOwnerStats(reloadedOwner);
+check("the leader's block is labelled history, never evidence", /never evidence about the code/.test(ownerBlock) && /Missions run here: 2/.test(ownerBlock) && /src\/lib\/format\.ts \(2\)/.test(ownerBlock));
+const ownerSection = renderOwnerSection(reloadedOwner);
+check("the greeting says what it learned and how to teach it more", /## What I know about you and this work/.test(ownerSection) && /2 missions/.test(ownerSection) && /collective_memory \{ action: "ruling"/.test(ownerSection));
+const manyOwner = await recordMission(tmp, learning({ id: "m-three", grade: "thin", units: 1, verified: 0, rejected: 0, files: Array.from({ length: 45 }, (_, i) => `src/f${i}.ts`), skills: [] }));
+check("the hot-file list is bounded so the greeting stays cheap", manyOwner.files.length === 40);
+await fs.writeFile(ownerFile(tmp), "{not json");
+check("a corrupt record is treated as nothing learned, not as a broken greeting", (await loadOwner(tmp)).missions === 0);
+
 await fs.rm(tmp, { recursive: true, force: true }).catch(() => {});
 console.log(failures ? `\nARITHMETIC FAIL: ${failures} check(s)` : "\nARITHMETIC PASS");
 process.exit(failures ? 1 : 0);

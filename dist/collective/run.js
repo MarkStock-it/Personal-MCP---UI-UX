@@ -18,6 +18,7 @@ import { pLimit } from "../util/limit.js";
 import { askJson } from "./ask.js";
 import { LeaderPlanSchema, SynthesisSchema, WorkerReportSchema, leaderSystem, leaderUser, synthesisSystem, workerSystem, workerUser, } from "./roles.js";
 import { admitFromMission, loadMemory, renderMemoryBlock } from "./memory.js";
+import { loadOwner, recordMission, renderOwnerStats } from "./owner.js";
 import { renderConversation, runPeerRound } from "./peer.js";
 import { handleFor } from "./personas.js";
 import { discoverSkills, findSkill, readSkill } from "../skills/index.js";
@@ -44,6 +45,12 @@ export async function runMission(projectRoot, cfg, input, log) {
     if (memory.live.length || memory.stale.length) {
         log(`memory: ${memory.live.length} live entr${memory.live.length === 1 ? "y" : "ies"} in front of the collective${memory.stale.length ? `, ${memory.stale.length} retired as stale` : ""}`);
     }
+    // History of past missions here: counts and hot files, never evidence. One small JSON read, and the
+    // leader gets it as a labelled block so it knows where this repo's work keeps landing.
+    const owner = await loadOwner(projectRoot);
+    const ownerBlock = renderOwnerStats(owner);
+    if (owner.missions)
+        log(`owner: ${owner.missions} earlier mission(s) here, hot files in front of the leader`);
     // The owner's skills. Only their names and one-line intents go to the leader; the text itself is read
     // later, and only for the units that were actually assigned one, so an unused skill costs nothing.
     const scan = cfg.skills.enabled ? await discoverSkills(projectRoot, cfg.skills) : { skills: [], roots: [], notes: [] };
@@ -65,7 +72,7 @@ export async function runMission(projectRoot, cfg, input, log) {
     const planAsk = await askJson({
         role: "leader",
         system: leaderSystem(maxUnits, skillIndex || undefined),
-        user: leaderUser({ mission: input.mission, digest, focus: input.focus, paths: input.paths, maxUnits, memory: memoryBlock }),
+        user: leaderUser({ mission: input.mission, digest, focus: input.focus, paths: input.paths, maxUnits, memory: memoryBlock, owner: ownerBlock }),
         schema: LeaderPlanSchema,
         maxTokens: 2200,
         attempts: 2,
@@ -357,6 +364,26 @@ export async function runMission(projectRoot, cfg, input, log) {
         const a = assigned.get(u.id);
         return a ? [{ name: a.name, unit: u.id, path: a.path, bytes: a.bytes }] : [];
     });
+    // The owner record is learned on the way out, from this mission's own numbers: no model call, and a
+    // failure to persist it is a warning rather than a lost mission (read-only projects are real).
+    try {
+        await recordMission(projectRoot, {
+            id,
+            mission: input.mission,
+            grade: finalVerdict.grade,
+            units: units.length,
+            verified: verification.counts.verified,
+            rejected: verification.rejected.length,
+            files: [
+                ...verification.claims.filter((c) => c.status === "verified").map((c) => c.path),
+                ...edits.edits.map((e) => e.path),
+            ],
+            skills: skillsUsed.map((s) => s.name),
+        });
+    }
+    catch (e) {
+        warnings.push(`the owner record could not be written (${e instanceof Error ? e.message : String(e)})`);
+    }
     const dossier = renderDossier({ id, input, index, plan, units, reports, failed, verification, synthesis, conversation, repair, edits, editRepair, conclusion: conclusionIssues, conclusionRepair, verdict: finalVerdict, memory: memoryState, skills: skillsUsed, offered: offered.map((s) => s.name), stats, warnings });
     const dir = missionsDir(projectRoot);
     const file = path.join(dir, `${id}.md`);

@@ -28,8 +28,26 @@ The `image` role has no keyless option (sampling carries text, not image output)
 
 Handy for manual sessions: `DESIGN_MCP_PROJECT_DIR=/path/to/site node smoke/call.mjs <tool> '[json]'` calls one tool and prints the result.
 
+### Working from a host without sampling (Freebuff)
+
+Freebuff's MCP client is created without capabilities, so `sampling/createMessage` is refused and the `session`
+provider cannot run there. Two keyless things still work: the design pipeline with the role switched to
+`manual`, and the collective, because `collective_run` is a background job and `manual` waits for an answer.
+
+1. `collective_run { mission }` returns a job id at once; the job parks on its first model call.
+2. `manual_pending` lists the parked prompt and the file it was written to, under `.design-mcp/manual/`.
+3. Read that file, compose the reply its contract asks for, and call `manual_answer { id, text }`.
+4. The waiting job continues. Repeat for the plan, each worker, round two, the synthesis and any repair pass —
+   three to seven prompts for a small mission.
+5. `design_status` reports the finished job; the dossier is the result.
+
+Set `DESIGN_MCP_MANUAL_WAIT_MS` (for example `1800000`) in the server's env so a prompt waits instead of
+failing the job. Answers are cached by prompt, so if a job dies, running it again replays what was already
+answered and stops at the next unanswered prompt instead of starting over. Keep small questions small:
+`units: 1` and `peer: false` cut a mission to three prompts.
+
 ## Test it
-No API keys needed: `npm run build && npm test` runs two harnesses — the stdio smoke suite (261 checks) and `smoke/arithmetic.mjs`, which drives the built modules directly (81 checks) — 342 in all: tool/resource/prompt inventory, the playbook tools, config report, brief create/validate/never-overwrite, the codebase layer against a fixture repo including a tsconfig alias that must resolve to a real file, the reference lookup (a declaration with its kind and export status, every use with its line, a use reached through a tsconfig alias, a name used but never declared, a name nothing mentions, a mention in a document labelled as a mention rather than a call), the edit gate against a fixture whose import graph is known (an anchor that is really there, one that is real but cited at stale lines, one that occurs three times, a line range past the end of the file, a path the leader invented, a path outside the project, an edit in a file the index skipped, the call sites named for an identifier anchor, and the snapshot hash each line number belongs to), the collective's repair pass, its computed verdict and the grade arithmetic behind it (a clean run grades `STRONG`, one edit that cannot be applied or one closing sentence that still contradicts the record stops that, and a claim the repair pass re-cited or withdrew no longer holds the run down), the conclusion gate turning an armed closing paragraph into two flagged sentences and the conclusion repair pass settling them one way each, its round-two conversation and its memory — including one invented quote that must be rejected and then repaired, withdrawn or left unaddressed by three different units, an unevidenced rebuttal that must be marked unproven, a memory entry whose code changed and must retire itself, and the session-install block covering each host's own instruction file — one file per host family, the host's own text never touched, and a removal that cleans every file it wrote — and every graceful error path).
+No API keys needed: `npm run build && npm test` runs two harnesses — the stdio smoke suite (263 checks) and `smoke/arithmetic.mjs`, which drives the built modules directly (92 checks) — 355 in all: tool/resource/prompt inventory, the playbook tools, config report, brief create/validate/never-overwrite, the codebase layer against a fixture repo including a tsconfig alias that must resolve to a real file, the reference lookup (a declaration with its kind and export status, every use with its line, a use reached through a tsconfig alias, a name used but never declared, a name nothing mentions, a mention in a document labelled as a mention rather than a call), the edit gate against a fixture whose import graph is known (an anchor that is really there, one that is real but cited at stale lines, one that occurs three times, a line range past the end of the file, a path the leader invented, a path outside the project, an edit in a file the index skipped, the call sites named for an identifier anchor, and the snapshot hash each line number belongs to), the collective's repair pass, its computed verdict and the grade arithmetic behind it (a clean run grades `STRONG`, one edit that cannot be applied or one closing sentence that still contradicts the record stops that, and a claim the repair pass re-cited or withdrew no longer holds the run down), the conclusion gate turning an armed closing paragraph into two flagged sentences and the conclusion repair pass settling them one way each, its round-two conversation and its memory — including one invented quote that must be rejected and then repaired, withdrawn or left unaddressed by three different units, an unevidenced rebuttal that must be marked unproven, a memory entry whose code changed and must retire itself, and the session-install block covering each host's own instruction file — one file per host family, the host's own text never touched, and a removal that cleans every file it wrote — and every graceful error path).
 With keys, in Cursor chat: "run providers_config", then "run providers_test for each role", then "usage_report".
 Or: `npm run inspect`.
 
@@ -202,6 +220,14 @@ which are permanent and never pruned).Admission is quality-gated — a claim nee
 claim (thin support is kept out and reported), *and* a mission that reached a conclusion — and every entry is
 re-checked against the file as it is now when it is loaded. Anything whose code has changed or gone is marked stale, reported, and kept out
 of every prompt. Read it any time with `collective_memory`, or as the resource `code://memory`.
+
+Alongside it, `.design-mcp/collective/owner.json` is the collective's record of the work itself: how many
+missions have run in this repo, what they graded, the files they kept landing on, and which of your skills
+actually reached a worker. It is written on the way out of every mission with no model call, it is bounded
+so the greeting stays cheap, it is best-effort (a corrupt or read-only record never breaks a mission), and
+the greeting reads it so a new session starts already knowing where the work has been. It is history and
+never evidence: nothing in it can be cited as a fact about the code. Your preferences still live in
+rulings, in your own words, because a server can record what happened but only you can say what you want.
 
 ### Why it is built this way, and what the "AI society" stories really were
 
