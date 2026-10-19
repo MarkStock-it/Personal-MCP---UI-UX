@@ -90,6 +90,24 @@ server.registerTool("providers_config", {
         return fail(e);
     }
 });
+/* ---- which repo is this session on? ---- */
+/**
+ * Point the session at a repository the owner named. Shared by `project_root` and `code_index { path }`:
+ * the second exists because some hosts only let an assistant call tools that were approved when the
+ * server was installed, so "index that repo instead" has to be reachable through a tool that is already
+ * on the list. Same rules either way: the folder must exist, and a home folder or drive root is refused.
+ */
+async function adoptProjectPath(wanted) {
+    const abs = path.resolve(wanted);
+    const st = await fs.stat(abs).catch(() => null);
+    if (!st?.isDirectory())
+        return `There is no folder at ${abs}. Pass an absolute path to the repository.`;
+    if (isTooBroad(abs)) {
+        return `${abs} is a home folder or a drive root, not a repository — point at a project folder instead. That is the exact mistake this exists to stop.`;
+    }
+    setSessionRoot(abs);
+    return null;
+}
 server.registerTool("project_root", {
     title: "Which repository this session is working on",
     description: "Reports the repository every project-scoped tool reads, and where that answer came from (a path you named, DESIGN_MCP_PROJECT_DIR, the folder the host reported as its workspace, or the working directory). Pass `path` to point this session at a different repository: one install of this server is meant to serve any repo, and a stdio server cannot see which folder you have open unless it is told. The choice is session-scoped — it outranks DESIGN_MCP_PROJECT_DIR, is never written to a config file, and is forgotten when the server restarts. A home folder or a drive root is refused: that is a location, not a repository, and indexing one is how a whole home directory once became \"the project\".",
@@ -100,15 +118,10 @@ server.registerTool("project_root", {
     try {
         let changed = "";
         if (wanted !== undefined) {
-            const abs = path.resolve(wanted);
-            const st = await fs.stat(abs).catch(() => null);
-            if (!st?.isDirectory())
-                return fail(`There is no folder at ${abs}. Pass an absolute path to the repository.`);
-            if (isTooBroad(abs)) {
-                return fail(`${abs} is a home folder or a drive root, not a repository — which is the exact mistake this tool exists to stop. Point at a project folder instead.`);
-            }
-            setSessionRoot(abs);
-            changed = `Now using ${abs} for the rest of this session. Nothing was written to disk, and this outranks DESIGN_MCP_PROJECT_DIR until the server restarts.`;
+            const problem = await adoptProjectPath(wanted);
+            if (problem)
+                return fail(problem);
+            changed = `Now using ${path.resolve(wanted)} for the rest of this session. Nothing was written to disk, and this outranks DESIGN_MCP_PROJECT_DIR until the server restarts.`;
         }
         const info = await ensureProject();
         const repo = repoRootOf(info.root);
@@ -639,10 +652,21 @@ server.registerTool("sequence_extract", {
 server.registerTool("code_index", {
     title: "Index this codebase",
     description: "Walks the project and indexes it: every file, every declaration it can see with its line numbers, every import, how the project is built and run, and its own rule files. The index is cached in .design-mcp/codebase/index.json and reused until a file actually changes (path, size or mtime), so calling it again after an edit costs one stat pass rather than a re-read. It respects .gitignore (via git ls-files) and the codebase.roots/ignore config, and it never reads outside the project. No model is called, so this is fast and cannot be wrong in the way prose is wrong. Run it first, then read its digest instead of opening files at random.",
-    inputSchema: { refresh: z.boolean().optional().describe("Rebuild even if nothing changed") },
-}, async ({ refresh }) => {
+    inputSchema: {
+        refresh: z.boolean().optional().describe("Rebuild even if nothing changed"),
+        path: z
+            .string()
+            .optional()
+            .describe("Index this repository instead: points the whole session at it, exactly like project_root { path }"),
+    },
+}, async ({ refresh, path: wanted }) => {
     try {
         const t0 = Date.now();
+        if (wanted !== undefined) {
+            const problem = await adoptProjectPath(wanted);
+            if (problem)
+                return fail(problem);
+        }
         const { config } = loadConfig();
         const loaded = await getIndex(projectDir(), config.codebase, { refresh: !!refresh });
         const digest = renderDigest(loaded.index, { tokens: config.codebase.digestTokens });
