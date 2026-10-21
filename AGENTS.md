@@ -8,7 +8,7 @@ Node >= 20, TypeScript, ESM. `dist/` is committed because the host runs `dist/in
 ```bash
 npm install
 npm run build          # tsc -> dist/
-npm test               # 434-check keyless gate: smoke/smoke.mjs (300, stdio suite) + smoke/arithmetic.mjs (134, the built modules driven directly); no API keys needed
+npm test               # 502-check keyless gate: smoke/smoke.mjs (306, stdio suite) + smoke/arithmetic.mjs (174, the built modules driven directly) + smoke/agent-e2e.mjs (22, two whole agent runs against a stub Ollama); no API keys needed
 DESIGN_MCP_PROJECT_DIR=<dir> node smoke/call.mjs <tool> '[json]'   # call one tool
 npm run inspect        # MCP inspector
 npx tsx tools/lab/run.ts   # the memory experiment; see tools/lab/README.md (not a gate)
@@ -32,23 +32,35 @@ fixture SKILL.md that must be found, read, and pasted into exactly the worker th
 edit gate over the edits those missions proposed (an invented file, a real anchor cited at stale lines, an
 anchor that occurs three times, the snapshot hash, the closing plan's own steps), the session-block
 installer (idempotent, and it must not touch text outside its markers), and every graceful
-error path. `smoke/arithmetic.mjs` (115 checks) then drives the built index cache, the built edit gate, the built merge and the built verdict directly, because
+error path. `smoke/arithmetic.mjs` (174 checks) then drives the built index cache, the built edit gate, the built merge, the built verdict, the agent's path resolver, its command policy, its journal revert and its tool loop (with a scripted model call) directly, because
 neither is reachable through a mission at reasonable cost: the full status matrix (anchored, stale,
 ambiguous, not found, out of range, missing, refused, unindexed, and the import-graph impact behind each)
 and every grade rule (a clean run is `STRONG`; one unapplicable edit, one wrong citation, one thin quote, one
 silent unit, no closing pass or one sentence of that paragraph that still contradicts the record are each
 enough to stop it, and a step that was re-placed by the edit repair pass or a sentence the conclusion pass
-rewrote to stand on the record stops counting). It must all pass — 405/405 (290 + 115) — before
-any change is called done.
+rewrote to stand on the record stops counting). `smoke/agent-e2e.mjs` (22 checks) starts two whole agent runs
+through the real MCP surface against a stub Ollama server: one that passes the gate and is kept, and one whose
+write breaks the fixture's own test and is reverted byte-for-byte with its work kept as `proposed.patch` — the
+executor is only allowed to exist if its own gate is asserted, not described. It must all pass — 502/502
+(306 + 174 + 22) — before any change is called done.
 
 ## Map
-- `src/index.ts` — the MCP surface: 37 tools — 15 generating/testing, 6 playbook, 10 codebase/collective
+- `src/index.ts` — the MCP surface: 38 tools — 15 generating/testing, 6 playbook, 10 codebase/collective
   (code_index, code_digest, code_context, code_refs, code_verify_cites, code_verify_edits, collective_plan, collective_run,
   collective_report, collective_memory), 5 session/skill (collective_hello, collective_install, skills_list,
-  skills_read, project_root), 1 local-delegation (local_mode) — 11 `design://` + 7 `code://`
-  resources, 5 prompts. Registered at the bottom; the codebase, collective and local_mode blocks are
+  skills_read, project_root), 1 local-delegation (local_mode), 1 hands (agent_run) — 11 `design://` + 7 `code://`
+  resources, 5 prompts. Registered at the bottom; the codebase, collective, local_mode and agent blocks are
   clearly marked. The smoke suite asserts this count from its own list (a hardcoded label has drifted
   twice), so adding a tool means adding it there too.
+- `src/agent/` — the hands: `agent_run`'s tool loop, confinement, journal and gate. `sandbox.ts` is the one
+  door for every path (`realpath` of the deepest existing ancestor, the secret list, `writeRoots`); `bash.ts`
+  is the command policy as one pure function (`off` / `allowlist` / `shell` + `DESIGN_MCP_AGENT_SHELL=1`);
+  `journal.ts` captures pre-images BEFORE each effect and reverts byte-for-byte; `tools.ts` is the ten-tool
+  surface (and the deliberate absences); `loop.ts` is `/api/chat` with tools, four caps, deterministic
+  context aging and an injectable model call (that injection is what lets the gate test a whole run with no
+  server); `gate.ts` reuses `verifyEdits`, one council diff review and the project's own commands; `index.ts`
+  is the preflight (off by default, config-file only, one run at a time, clean tree) and the job. The Hands
+  section below is the contract; read it before treating any of this as a sandbox.
 - `src/project.ts` — which repository this session is working on, and the refusal when the answer is a
   home folder. **Read its header before changing the resolution order.** One install of this server is
   used from many repos, and the host's launch directory is not the repo: `project_root` ->
@@ -262,6 +274,51 @@ off the workflow is byte-identical to before it existed — zero Ollama calls, n
   whether they are right. `health` reports `remote`/`parameterSize` from `/api/tags` (`remote_host`, no
   local size), so a cloud model is never mistaken for a missing one.
 
+## Hands: `agent_run` (opt-in, config-gated, diff-gated)
+
+The server does not expose a general command runner. `agent_run` is the single deliberate exception, and the
+two things that make it acceptable are that it is **off unless the config file says otherwise** and that a
+run is **reverted unless the gate passes**. The plan it was built against, with the fifteen invariants, is
+`docs/agent-exec-plan.md`; `smoke/agent-e2e.mjs` drives two whole runs through the real MCP surface against a
+stub Ollama (one kept, one reverted byte-for-byte).
+
+This is the contract, and it is what the code does — with the two gaps named at the end, not hidden:
+- **Off by default, and config-file only.** `agent.enabled` has no runtime flip and no tool that sets it: a
+  model must never be one call away from giving itself a shell. A tool argument that looks like an enable
+  switch is a bug, not a convenience.
+- **Confined.** Every path argument is `realpath`-resolved and must land inside the project (the deepest
+  existing ancestor decides, which is the difference between `path.resolve` and `realpath`); writes only
+  under `agent.writeRoots`, which defaults to **empty** — read-only until the owner names a directory. Reads
+  and writes are denied outright for `.git/`, `node_modules/`, `.design-mcp/`, `dist/` and the secret list
+  (`.env*`, `*.pem`, `*.key`, `id_rsa*`, `.npmrc`, `.netrc`). A refusal names the rule it hit, because the
+  model can only correct what it is told.
+- **Journaled before the effect.** Pre-image bytes for every file the run touches (written by the server, not
+  through the tool layer), one journal line before each write or command, and every command recorded with
+  its cwd, exit code, duration and truncated output. A failed revert is reported as `unsafe` and named —
+  never smoothed over, the same instinct as `delegate.ts`.
+- **Command policy is one function.** `agent.bash.mode`: `off`, `allowlist` (argv-prefix match, shell
+  metacharacters refused — so `npm test -- sm` passes and `npm test; curl …` does not), or `shell`, which
+  needs the config **and** `DESIGN_MCP_AGENT_SHELL=1`. Env is the `agent.bash.env` subset, so an API key in
+  the server's environment never becomes an API key in the transcript.
+- **Kept only through the gate.** `verifyEdits` must find no broken anchor, one council diff review must pass,
+  and the project's own tests must pass; anything else reverts byte-for-byte and keeps
+  `.design-mcp/agent/<id>/proposed.patch`. The model's own `summary` is never read as a verdict.
+- **One run at a time per project**, as a job with a `design_status` line, because a run is minutes of model
+  calls; `maxRounds`, `maxToolCalls` and `maxWallClockSec` are config, and the counters live in
+  `.design-mcp/agent-state.json` and are reported, so "is this earning its keep" has a number under it.
+- **Honest boundary.** This is confinement and reversibility, **not isolation**. `shell` mode is the owner's
+  terminal in that directory; the protection is the revert plus the review, not the path checks. A worktree
+  is tidiness, not a sandbox.
+- **Never:** a delete tool, commits, pushes, installs, network, sub-agents, or any path by which a skill, a
+  memory entry or a mission reaches it. The fifteen invariants and their stub-Ollama tests in the plan are
+  the acceptance criteria; a milestone that cannot assert its own is not done.
+- **Two gaps, stated rather than hidden.** `agent.isolation: "worktree"` is accepted by the schema and
+  **refused at preflight** — this build only runs in place, and a silent downgrade would make the report claim
+  an isolation the run never had. And the council diff review needs a host that answers MCP sampling: where it
+  cannot, the run fails closed (nothing kept) unless the owner sets `agent.gates.councilReview: false`, and
+  the report says which of those happened. A diff kept with the review off was never independently read — the
+  report must keep saying so.
+
 ## Round two, and what the copies remember
 - Round two (`collective.peerRound`, one extra model call per unit) exchanges **verified findings only** —
   a worker never sees another's unchecked claims — and a rebuttal that carries a quote is put through the
@@ -311,7 +368,9 @@ off the workflow is byte-identical to before it existed — zero Ollama calls, n
   the units that asked, and a skill the leader names that cannot be found is a warning, never a silent
   no-op. Do not add a path where a skill's own claims get cited as facts about the repository, and do not
   give the server a general command runner to "run" a skill with: the host already has a terminal, and a
-  tool that executes whatever a model asks for is a hole in every project this server is pointed at.
+  tool that executes whatever a model asks for is a hole in every project this server is pointed at — with
+  one named, config-gated exception, `agent_run`, whose terms are in the Hands section above. Nothing else
+  gets one, and no mission, skill or memory entry can reach it.
 - Default roots cover the Freebuff account skills and the usual project/home skill folders (`skills.roots`
   in the config, `~` allowed). Discovery walks a few directory levels and stops at symlinks.
 - **A host that does not answer MCP sampling can still run a mission, on the `manual` provider.** Freebuff's
@@ -337,6 +396,8 @@ Every entry carries `sources` with a real URL, the exact licence name and a `cha
 - Do not commit `node_modules/` (it is gitignored; two packages were tracked historically — do not add more).
 - Do not write to stdout in `src/index.ts` (it carries the protocol); use `console.error`.
 - Do not weaken a smoke check to make a build pass.
+- Do not add a second command runner, and do not widen `agent_run` past its section: one exception, with the
+  gate attached, is the whole allowance.
 - Do not let a skill's text, or a memory entry, count as a citation. Quotes from files do that, and only
   the files.
 

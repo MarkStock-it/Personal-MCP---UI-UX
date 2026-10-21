@@ -204,6 +204,72 @@ export const ConfigSchema = z.object({
         allowDirty: z.boolean().default(false),
     })
         .default({}),
+    // OPTIONAL hands for the local model: `agent_run`, a separate tool that lets it read, write inside named
+    // directories and run commands, then reverts the run unless the edit gate, one council diff review and the
+    // project's own tests all pass. Default OFF, and config-file only: there is no runtime flip and no tool
+    // that turns it on, because a model that can enable its own executor has no gate left in front of it.
+    // Every field here is inert until src/agent/ lands — the schema exists first so a config can be written
+    // and validated before the executor does anything. See docs/agent-exec-plan.md.
+    agent: z
+        .object({
+        enabled: z.boolean().default(false),
+        host: z.string().default("http://127.0.0.1:11434"),
+        // Must be a tools-capable model (qwen2.5-coder, qwen3, devstral, llama3.1); checked against /api/tags
+        // before a run, and refused with the list Ollama actually has when it is missing.
+        model: z.string().default("qwen2.5-coder:14b"),
+        // Tool transcripts are bigger than one file slice: that is why this default is larger than local's.
+        numCtx: z.number().int().min(4096).max(262144).default(32768),
+        temperature: z.number().min(0).max(2).default(0.1),
+        numThread: z.number().int().min(1).max(64).default(5),
+        keepAliveM: z.number().int().min(1).max(240).default(5),
+        maxOutputTokens: z.number().int().min(256).max(32768).default(4096),
+        // One model call, not the whole run.
+        timeoutSec: z.number().int().min(30).max(900).default(180),
+        // Model turns, total tool invocations, and the wall clock for the whole run. Whichever fires first ends it.
+        maxRounds: z.number().int().min(1).max(60).default(24),
+        maxToolCalls: z.number().int().min(1).max(200).default(60),
+        maxWallClockSec: z.number().int().min(60).max(3600).default(900),
+        // Every write must land under one of these, relative to the project root. Empty = the file tools refuse
+        // to write at all (a read-only run), which is the honest default for a repo nobody has scoped yet.
+        writeRoots: z.array(z.string()).default([]),
+        // A revert must never be able to eat work that was never ours — same reason as local.allowDirty.
+        requireClean: z.boolean().default(true),
+        // "worktree" runs on a throwaway git worktree so the owner's checkout is never touched. Neither mode is
+        // a security boundary; both rely on the snapshot and the end-of-run gate.
+        isolation: z.enum(["in-place", "worktree"]).default("in-place"),
+        maxWriteKB: z.number().int().min(1).max(2048).default(256),
+        maxDiffFiles: z.number().int().min(1).max(64).default(8),
+        maxDiffLines: z.number().int().min(10).max(4000).default(400),
+        bash: z
+            .object({
+            // "off" = no command tool at all; "allowlist" = argv-matched allow list; "shell" = a real shell,
+            // opt-in twice (this setting AND DESIGN_MCP_AGENT_SHELL=1), because a config copied from a gist must
+            // not be able to arm it on its own.
+            mode: z.enum(["off", "allowlist", "shell"]).default("allowlist"),
+            allow: z
+                .array(z.string())
+                .default([
+                "npm test", "npm run build", "npm run smoke", "npx tsc --noEmit", "npx eslint",
+                "node ", "git status", "git diff", "git log", "git show", "ls", "cat", "rg", "find", "wc",
+            ]),
+            timeoutSec: z.number().int().min(5).max(900).default(120),
+            maxOutputKB: z.number().int().min(1).max(256).default(32),
+            // The only env vars a command sees. Anything not named is dropped, so an API key in the server's
+            // environment does not become an API key in the transcript.
+            env: z.array(z.string()).default(["PATH", "HOME", "TMPDIR", "LANG"]),
+        })
+            .default({}),
+        // The end-of-run gate. The command strings themselves come from local.audit.
+        gates: z
+            .object({
+            runTests: z.boolean().default(true),
+            runTypecheck: z.boolean().default(true),
+            councilReview: z.boolean().default(true),
+            timeoutSec: z.number().int().min(30).max(3600).default(600),
+        })
+            .default({}),
+    })
+        .default({}),
     test: z
         .object({
         // "chromium" = Playwright's bundled browser. "chrome"/"msedge" = the one already installed on your machine.

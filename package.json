@@ -9,7 +9,7 @@
   },
   "scripts": {
     "build": "tsc",
-    "smoke": "node smoke/smoke.mjs && node smoke/arithmetic.mjs",
+    "smoke": "node smoke/smoke.mjs && node smoke/arithmetic.mjs && node smoke/agent-e2e.mjs",
     "test": "npm run smoke",
     "serve": "node scripts/serve.mjs",
     "start": "node dist/index.js",

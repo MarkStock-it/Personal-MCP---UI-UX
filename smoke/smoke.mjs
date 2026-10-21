@@ -327,6 +327,8 @@ try {
     "collective_hello", "collective_install", "skills_list", "skills_read", "project_root",
     // the optional local-model delegation (off by default: zero Ollama calls until local_mode flips it on)
     "local_mode",
+    // hands for the local model: config-gated, project-confined, diff-gated (off by default)
+    "agent_run",
   ];
   // Computed, not typed: a hardcoded number in this label has already drifted from the list twice.
   check(`${expected.length} tools registered (${names.length} found)`, names.length === expected.length, names.join(","));
@@ -1053,6 +1055,19 @@ try {
   check("flipping off announces the immediate stop", !flipOff.error && /Local mode is OFF/.test(flipOff.text) && /aborted/.test(flipOff.text), flipOff.text.slice(0, 300));
   const lmAfterOff = await call("local_mode");
   check("the status returns to off, recorded as a runtime decision", !lmAfterOff.error && /local mode: off \(set with local_mode/.test(lmAfterOff.text), lmAfterOff.text.slice(0, 300));
+
+  console.log("== agent_run: off by default, and the refusal carries the fix ==");
+  const agentStatus = await call("agent_run");
+  check("agent_run reports itself OFF without a model call", !agentStatus.error && /agent_run is OFF/.test(agentStatus.text), agentStatus.text.slice(0, 200));
+  check("...and names the config key to change", /agent\.enabled/.test(agentStatus.text));
+  check("...and says writes are read-only until a directory is named", /read-only until you name a directory/.test(agentStatus.text));
+  check("the lifetime counters start at zero and are shown", /0 run\(s\)/.test(agentStatus.text));
+  const agentRefused = await call("agent_run", { task: "add a helper to the fixture and run its tests" });
+  check("a run is refused before anything is sent", agentRefused.error && /agent_run is OFF/.test(agentRefused.text), agentRefused.text.slice(0, 220));
+  // The same rule the Hands section states: no argument enables it. The schema has no such field, and the
+  // server reads only the config file, so a caller that names one is ignored rather than obeyed.
+  const agentSneaky = await call("agent_run", { task: "add a helper to the fixture", enabled: true });
+  check("...and a caller cannot enable it by asking", agentSneaky.error && /agent_run is OFF/.test(agentSneaky.text), agentSneaky.text.slice(0, 220));
 
   const missionPrompt = await client.getPrompt({ name: "collective_mission", arguments: { mission: "ship the cleaning change" } });
   check("the mission prompt carries the whole protocol", /Run it as the collective/.test(missionPrompt.messages?.[0]?.content?.text ?? "") && /CITATION CONTRACT/.test(missionPrompt.messages[0].content.text));

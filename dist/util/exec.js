@@ -7,12 +7,17 @@ import { spawn } from "node:child_process";
  * a path with `&` or `^` in it stops being a path. A real executable such as git takes `{ shell: false }`:
  * one less process, args that stay args, and no DEP0190 on the server's stderr.
  */
-export function run(cmd, args, cwd, timeoutMs, opts = {}) {
+export function run(cmd, args, cwd, timeoutMs, 
+// `env` is an explicit replacement for the child's environment, used by the agent's command tool: it passes
+// only the names in `agent.bash.env`, so an API key in the server's environment never reaches a command it
+// runs, and never lands in the transcript. Omitted, the child inherits the server's environment as before.
+opts = {}) {
     return new Promise((resolve) => {
         const win = process.platform === "win32";
         let out = "";
         let timedOut = false;
-        const child = spawn(cmd, args, { cwd, shell: opts.shell ?? win, env: { ...process.env, CI: "1", NO_COLOR: "1", FORCE_COLOR: "0" } });
+        const env = opts.env ? { CI: "1", NO_COLOR: "1", FORCE_COLOR: "0", ...opts.env } : { ...process.env, CI: "1", NO_COLOR: "1", FORCE_COLOR: "0" };
+        const child = spawn(cmd, args, { cwd, shell: opts.shell ?? win, env });
         const add = (d) => {
             out += d.toString();
             if (out.length > 200_000)

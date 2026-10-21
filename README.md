@@ -445,6 +445,50 @@ A skill is **instructions**, not a tool, and not evidence. So:
   execution stays with the host that already has a terminal and your approval — which is also how skills are
   meant to work: the model reads the instructions and then does the work itself.
 
+### Phase 9: `agent_run` — hands for the local model (off by default)
+
+> **Built, and off until you say otherwise.** With `agent.enabled` absent or false, nothing here calls Ollama
+> and no tool can write. The invariants and their tests are in
+> [`docs/agent-exec-plan.md`](docs/agent-exec-plan.md); two whole runs (one kept, one reverted) are driven
+> through the real MCP surface in `smoke/agent-e2e.mjs`.
+
+Phase 7½ gives the local model one blind turn: the server pastes a slice of files and the model returns whole
+files, which are audited or thrown away. `agent_run` is the other shape — a loop over Ollama's `/api/chat`
+where the model can read, search, write inside directories you name and run commands, and then has to survive
+the same kind of gate before a byte stays.
+
+```jsonc
+// design-mcp.config.json — the only way to turn it on; there is no runtime flip and no tool that sets it
+"agent": {
+  "enabled": true,
+  "model": "qwen2.5-coder:14b",       // must be tools-capable; checked against /api/tags
+  "writeRoots": ["src/playbook"],     // empty (the default) = read-only
+  "bash": { "mode": "allowlist" }    // off | allowlist | shell (+ DESIGN_MCP_AGENT_SHELL=1)
+}
+```
+
+- **Nothing is kept on the model's word.** Every file is snapshotted before the first write, every command is
+  journaled with its exit code, and a run is reverted byte-for-byte unless the edit gate finds no broken
+  anchor, one council diff review passes, and your own tests pass. On failure the diff stays in
+  `.design-mcp/agent/<id>/proposed.patch` so the work is readable rather than destroyed.
+- **One run at a time per project**, as a job: `agent_run` returns an id and `design_status` follows it, with
+the caps (`maxRounds`, `maxToolCalls`, `maxWallClockSec`) in the config. The counters — runs, kept, reverted,
+rounds, commands — live in `.design-mcp/agent-state.json` and are reported, so the question "is this faster
+than doing it myself" has a number under it.
+- **It is not a sandbox.** Path confinement and the revert are real; `shell` mode is still your terminal in
+  that directory, and a worktree is tidiness rather than isolation. If you need isolation, run the server
+  inside a container or a VM.
+- **It does not replace the collective or Phase 7½.** No other tool, mission, skill or memory entry can reach
+  it, and it is the only command runner this server will ever have.
+- **Two limits worth knowing before you turn it on.** The council diff review runs on your host's model, so a
+  host that cannot answer MCP sampling (Freebuff's MCP client, Cursor) makes a run fail closed unless you set
+  `agent.gates.councilReview: false` — and then nothing read the diff, which the report keeps saying.
+  `agent.isolation: "worktree"` is accepted by the schema but refused at start: this build runs in place only,
+  and the snapshot plus the gate are what protect your tree.
+- **What it can do, in its own vocabulary:** `read_file`, `list_files`, `search`, `who_refs`, `read_context`,
+  `write_file`, `edit`, `run`, `run_audit`, `finish`. No delete, no commit, no install, no network, no
+  sub-agents. `agent_run` with no task shows the mode, the model, the write roots and the lifetime counters.
+
 ## Phase 2 workflow
 1. `brief_init`: creates `brief.md` in your project. Fill it in.
 2. `brief_check`: tells you what's missing or too thin.

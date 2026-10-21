@@ -33,6 +33,7 @@ import { LeaderPlanSchema, leaderSystem, leaderUser } from "./collective/roles.j
 import { helloCollective } from "./collective/hello.js";
 import { cancelAll, health, isCloudModel, localCounters, resetWarned, settingsFor } from "./ollama/client.js";
 import { effectiveLocal, recordHealth, renderLocalStatus, writeLocalMode } from "./ollama/state.js";
+import { readAgentCounters, startAgentRun } from "./agent/index.js";
 import { installSessionBlock, removeSessionBlock, renderInstallReport } from "./collective/install.js";
 import { discoverSkills, findSkill, readSkill, renderSkillIndex } from "./skills/index.js";
 import { listDossiers, loadDossier, runMission } from "./collective/run.js";
@@ -1047,6 +1048,40 @@ server.registerTool("local_mode", {
             `this session's transport: ${counters.calls} request(s), ${counters.errors} failed, ${counters.timeouts} timed out, ${counters.refused} queued then cancelled by a mode switch`,
             eff.on ? "Health is checked when it is flipped on and before a mission delegates; with the mode off, zero Ollama calls happen." : "With the mode off, zero Ollama calls happen.",
         ].join("\n"));
+    }
+    catch (e) {
+        return fail(e);
+    }
+});
+server.registerTool("agent_run", {
+    title: "Run a tool-using agent (opt-in, config-gated)",
+    description: "The one deliberate exception to this server's no-command-runner rule. An Ollama model (/api/chat with tools) works on one task with its own hands: read_file, list_files, search, who_refs, read_context, write_file, edit, run, run_audit, finish. It is OFF unless design-mcp.config.json sets agent.enabled — there is no runtime flip and no argument here that turns it on, because a model must never be one call away from giving itself a shell. When it runs: every path is realpath-confined to the project, writes are allowed only under agent.writeRoots (empty = read-only), every command goes through agent.bash (off | allowlist | shell, the last needing DESIGN_MCP_AGENT_SHELL=1), every file is snapshotted before its first write, and the run is reverted byte-for-byte unless the edit gate finds no broken anchor, one council diff review passes and the project's own typecheck/tests pass — otherwise the diff is kept as proposed.patch. It runs as a background job: poll design_status. This is confinement and reversibility, not isolation: shell mode is your terminal in that directory, so leave it off unless you mean it. Call with no task for the status and lifetime counters.",
+    inputSchema: {
+        task: z.string().optional().describe("What to change or find out, in one or two sentences. Omit for the status and counters."),
+        writeRoots: z.array(z.string()).optional().describe("Override agent.writeRoots for this run; an empty array is a read-only run"),
+        maxRounds: z.number().int().min(1).max(60).optional().describe("Override agent.maxRounds for this run"),
+        dryRun: z.boolean().optional().describe("Read-only by construction: same as writeRoots: []"),
+    },
+}, async ({ task, writeRoots, maxRounds, dryRun }) => {
+    try {
+        const { config } = loadConfig();
+        const root = projectDir();
+        const cfg = config.agent;
+        if (!task || !task.trim()) {
+            const c = readAgentCounters(root);
+            return ok([
+                `agent_run is ${cfg.enabled ? "ON" : "OFF"} (config: ${cfg.enabled ? "agent.enabled is true" : 'agent.enabled is false — add "agent": { "enabled": true } to design-mcp.config.json'}).`,
+                `model: ${cfg.model} at ${cfg.host}${/[:-]cloud$/i.test(cfg.model) ? " — a cloud model: what it reads leaves this machine" : ""}`,
+                `writes allowed under: ${cfg.writeRoots.length ? cfg.writeRoots.join(", ") : "nothing (read-only until you name a directory)"}`,
+                `commands: ${cfg.bash.mode}${cfg.bash.mode === "shell" ? " (and DESIGN_MCP_AGENT_SHELL=1)" : ""} · caps ${cfg.maxRounds} rounds / ${cfg.maxToolCalls} calls / ${cfg.maxWallClockSec}s · requireClean ${cfg.requireClean} · isolation ${cfg.isolation}`,
+                `gates: typecheck ${cfg.gates.runTypecheck ? "on" : "off"}, tests ${cfg.gates.runTests ? "on" : "off"}, council review ${cfg.gates.councilReview ? "on" : "off"}`,
+                `lifetime: ${c.runs} run(s) — ${c.kept} kept, ${c.reverted} reverted, ${c.unsafe} unsafe, ${c.failed} failed · ${c.rounds} rounds · ${c.toolCalls} tool calls · ${c.commands} commands · ${c.refusals} refusals`,
+                c.runs ? "Records live in .design-mcp/agent/<runId>/{report.md,result.json,journal.jsonl,proposed.patch}." : "No run has been started in this repo yet.",
+                "It is not a sandbox: the gate and the revert are the protection, and shell mode is your terminal in that directory.",
+            ].join("\n"));
+        }
+        const run = await startAgentRun(root, config, { task, ...(writeRoots ? { writeRoots } : {}), ...(maxRounds ? { maxRounds } : {}), ...(dryRun ? { dryRun } : {}) });
+        return ok(run.text);
     }
     catch (e) {
         return fail(e);

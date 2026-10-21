@@ -581,6 +581,156 @@ await new Promise((r) => setTimeout(r, 80));
 check("a finished job is never reported stalled", finished.status === "done" && jobs.jobIsStalled(finished, 0) === false, finished.status);
 check("the idle time is worded for a status line", jobs.humanAge(5) === "5s" && jobs.humanAge(61) === "1m 1s" && jobs.humanAge(3720) === "1h 2m", `${jobs.humanAge(5)}/${jobs.humanAge(61)}/${jobs.humanAge(3720)}`);
 
+// ── agent: the confinement rules, the command policy, the revert, and the loop's caps ────────────────
+// The executor is only allowed to exist because these hold. Everything below is deterministic: no model, no
+// server, no network — the loop is driven with a scripted chat function, which is the whole reason it takes
+// one as a parameter.
+section("agent: confinement, command policy, revert and the loop's caps");
+const sandboxMod = await import(pathToFileURL(path.join(ROOT, "dist", "agent", "sandbox.js")).href);
+const bashMod = await import(pathToFileURL(path.join(ROOT, "dist", "agent", "bash.js")).href);
+const journalMod = await import(pathToFileURL(path.join(ROOT, "dist", "agent", "journal.js")).href);
+const toolsMod = await import(pathToFileURL(path.join(ROOT, "dist", "agent", "tools.js")).href);
+const loopMod = await import(pathToFileURL(path.join(ROOT, "dist", "agent", "loop.js")).href);
+
+const agentTmp = await fs.mkdtemp(path.join(os.tmpdir(), "design-mcp-agent-"));
+const agentOutside = await fs.mkdtemp(path.join(os.tmpdir(), "design-mcp-agent-outside-"));
+await fs.mkdir(path.join(agentTmp, "src", "lib"), { recursive: true });
+await fs.mkdir(path.join(agentTmp, ".git"), { recursive: true });
+await fs.mkdir(path.join(agentTmp, "node_modules", "x"), { recursive: true });
+await fs.writeFile(path.join(agentTmp, "src", "lib", "format.ts"), "export function formatMoney(cents) {\n  return (cents / 100).toFixed(2);\n}\n");
+await fs.writeFile(path.join(agentTmp, "src", "app.ts"), "import { formatMoney } from './lib/format.js';\nexport const price = () => formatMoney(1999);\n");
+await fs.writeFile(path.join(agentTmp, ".env"), "ANTHROPIC_API_KEY=sk-should-never-be-read\n");
+await fs.writeFile(path.join(agentTmp, ".git", "config"), "[remote]\n  url = https://example.com/private\n");
+await fs.writeFile(path.join(agentTmp, "docs.md"), "# docs\n");
+await fs.writeFile(path.join(agentOutside, "secret.txt"), "outside the project\n");
+await fs.symlink(path.join(agentOutside, "secret.txt"), path.join(agentTmp, "src", "escape.txt"));
+const agentSandbox = { root: agentTmp, writeRoots: [] };
+
+const relBad = sandboxMod.normalizeRel("../outside.txt");
+check("a path that leaves the project is refused by name", !relBad.ok && /leaves the project/.test(relBad.reason), JSON.stringify(relBad));
+const absBad = sandboxMod.normalizeRel("/etc/passwd");
+check("an absolute path is refused", !absBad.ok && /absolute paths are refused/.test(absBad.reason), JSON.stringify(absBad));
+check("a normal relative path is accepted", sandboxMod.normalizeRel("src/app.ts").ok === true);
+
+const secretRead = await sandboxMod.resolveRead(agentSandbox, ".env");
+check("the secret list refuses .env", !secretRead.ok && /secret file/.test(secretRead.reason), JSON.stringify(secretRead));
+const gitRead = await sandboxMod.resolveRead(agentSandbox, ".git/config");
+check(".git/ is unreadable, whatever the config says", !gitRead.ok && /\.git\//.test(gitRead.reason), JSON.stringify(gitRead));
+const nmRead = await sandboxMod.resolveRead(agentSandbox, "node_modules/x");
+check("node_modules/ is unreadable", !nmRead.ok, JSON.stringify(nmRead));
+const escapeRead = await sandboxMod.resolveRead(agentSandbox, "src/escape.txt");
+check("a symlink that points outside the project is refused", !escapeRead.ok && /symlink/.test(escapeRead.reason), JSON.stringify(escapeRead));
+const goodRead = await sandboxMod.resolveRead(agentSandbox, "src/app.ts");
+check("a real file inside the project resolves", goodRead.ok === true, JSON.stringify(goodRead));
+
+const readOnlyWrite = await sandboxMod.resolveWrite(agentSandbox, "src/new.ts");
+check("an empty writeRoots is a read-only run, and says so", !readOnlyWrite.ok && /read-only/.test(readOnlyWrite.reason), JSON.stringify(readOnlyWrite));
+const scoped = { root: agentTmp, writeRoots: ["src"] };
+const inScope = await sandboxMod.resolveWrite(scoped, "src/new.ts");
+check("a write inside writeRoots is allowed, even for a file that does not exist yet", inScope.ok === true, JSON.stringify(inScope));
+const outScope = await sandboxMod.resolveWrite(scoped, "docs.md");
+check("a write outside writeRoots is refused with the list", !outScope.ok && /outside the directories/.test(outScope.reason), JSON.stringify(outScope));
+const traversalWrite = await sandboxMod.resolveWrite(scoped, "src/../../etc/passwd");
+check("writeRoots does not make a traversal legal", !traversalWrite.ok, JSON.stringify(traversalWrite));
+
+const bashCfg = { mode: "allowlist", allow: ["npm test", "git status", "node"] };
+check("allowlist: a prefix match passes", bashMod.judge("npm test -- smoke", bashCfg).ok === true);
+check("allowlist: a different command sharing a prefix does not", bashMod.judge("npm testing", bashCfg).ok === false);
+check("allowlist: a pipeline is refused as a metacharacter, not parsed", bashMod.judge("npm test; curl http://x", bashCfg).ok === false && /metacharacter/.test(bashMod.judge("npm test; curl http://x", bashCfg).reason));
+check("allowlist: a command outside the list names the list", /not in agent\.bash\.allow/.test(bashMod.judge("curl http://x", bashCfg).reason));
+check("off: nothing runs at all", bashMod.judge("npm test", { mode: "off", allow: [] }).ok === false);
+const catCfg = { mode: "allowlist", allow: ["cat"] };
+check("a command cannot be the way around the secret list", bashMod.judge("cat .env", catCfg).ok === false && /secret file/.test(bashMod.judge("cat .env", catCfg).reason), JSON.stringify(bashMod.judge("cat .env", catCfg)));
+check("...nor around the denied directories", bashMod.judge("cat .git/config", catCfg).ok === false && /not readable by a command/.test(bashMod.judge("cat .git/config", catCfg).reason), JSON.stringify(bashMod.judge("cat .git/config", catCfg)));
+check("...while an ordinary file is still allowed", bashMod.judge("cat src/app.ts", catCfg).ok === true, JSON.stringify(bashMod.judge("cat src/app.ts", catCfg)));
+const shellVerdict = bashMod.judge("npm test", { mode: "shell", allow: [] });
+check("shell: a plain command is accepted", shellVerdict.ok === true && shellVerdict.shell === true);
+check("shell: an rmdir is refused by pattern", bashMod.judge("rm -rf node_modules", { mode: "shell", allow: [] }).ok === false);
+check("shell: a push is refused by pattern", bashMod.judge("git push origin main", { mode: "shell", allow: [] }).ok === false);
+check("shell mode stays unarmed without the second switch", bashMod.shellArmed({ mode: "shell", allow: [] }, {}) === false);
+check("...and is armed only with DESIGN_MCP_AGENT_SHELL=1", bashMod.shellArmed({ mode: "shell", allow: [] }, { DESIGN_MCP_AGENT_SHELL: "1" }) === true);
+check("the env subset drops everything not named", Object.keys(bashMod.envSubset({ PATH: "/bin", ANTHROPIC_API_KEY: "sk-x" }, ["PATH"])).join(",") === "PATH");
+
+const sample = "line one\nline two\nline three\n";
+check("an anchor that occurs once is placed", toolsMod.findAnchor(sample, "line two").count === 1);
+check("an anchor that occurs twice is refused with the count", toolsMod.findAnchor("a\nb\na\n", "a").count === 2);
+check("an anchor is matched across whitespace when the exact text misses", toolsMod.findAnchor("  const x = 1;\n", "const x = 1;").count === 1);
+check("the first changed line is the line the gate will check", toolsMod.firstChangedLine("a\nb\n", "a\nB\n").line === 2);
+
+const journal = await journalMod.createJournal(agentTmp, "arith-run");
+const formatPath = path.join(agentTmp, "src", "lib", "format.ts");
+const originalFormat = await fs.readFile(formatPath, "utf8");
+await journalMod.capture(journal, formatPath, "src/lib/format.ts");
+await fs.writeFile(formatPath, "export const broken = true;\n");
+const newPath = path.join(agentTmp, "src", "created.ts");
+await journalMod.capture(journal, newPath, "src/created.ts");
+await fs.writeFile(newPath, "export const created = true;\n");
+const revertReport = await journalMod.revert(journal);
+const afterRevert = await fs.readFile(formatPath, "utf8");
+check("the revert restores the exact bytes", afterRevert === originalFormat, JSON.stringify(afterRevert).slice(0, 120));
+check("...and removes a file the run created", (await fs.stat(newPath).catch(() => null)) === null);
+check("...and reports what it did", revertReport.restored.length === 1 && revertReport.deleted.length === 1 && revertReport.failed.length === 0, JSON.stringify(revertReport));
+
+const { config: agentBaseConfig } = loadConfig();
+const agentCfg = { ...agentBaseConfig.agent, enabled: true };
+const makeCtx = () => ({
+  sandbox: { root: agentTmp, writeRoots: [] },
+  journal,
+  index: { files: [] },
+  cfg: agentCfg,
+  audit: agentBaseConfig.local.audit,
+  log: () => {},
+  readPaths: new Set(),
+  writes: [],
+});
+const writeRefusal = await toolsMod.executeTool(makeCtx(), { name: "write_file", arguments: { path: "src/x.ts", content: "x" } });
+check("a write in a read-only run is refused, not attempted", /read-only/.test(writeRefusal.text), writeRefusal.text.slice(0, 160));
+const secretTool = await toolsMod.executeTool(makeCtx(), { name: "read_file", arguments: { path: ".env" } });
+check("the read tool cannot be talked past the secret list", /secret file/.test(secretTool.text), secretTool.text.slice(0, 160));
+
+const loopCtx = makeCtx();
+let turn = 0;
+const scripted = async () => {
+  turn++;
+  if (turn === 1) return { content: "", toolCalls: [{ name: "read_file", arguments: { path: "src/lib/format.ts" } }] };
+  return { content: "", toolCalls: [{ name: "finish", arguments: { summary: "read the file; changed nothing" } }] };
+};
+const loopOut = await loopMod.runToolLoop({
+  ctx: loopCtx,
+  chat: scripted,
+  system: "system",
+  task: "look at the file",
+  maxRounds: 4,
+  maxToolCalls: 4,
+  maxWallClockSec: 30,
+  numCtx: 8192,
+  log: () => {},
+});
+const toolMessage = loopOut.messages.find((m) => m.role === "tool");
+// Two calls: the read, then finish (finish is a tool call too, and counting it is what makes maxToolCalls honest).
+check("the loop runs a tool and ends on finish", loopOut.stop === "finish" && loopOut.toolCalls === 2, JSON.stringify({ stop: loopOut.stop, calls: loopOut.toolCalls }));
+check("the tool result really contains the file with its own line numbers", /src\/lib\/format\.ts/.test(toolMessage.content) && /1  export function/.test(toolMessage.content), (toolMessage.content || "").slice(0, 120));
+check("the summary is the model's account, carried out separately", /changed nothing/.test(loopOut.summary));
+
+let sameTurn = 0;
+const repeat = async () => {
+  sameTurn++;
+  return { content: "", toolCalls: [{ name: "read_file", arguments: { path: "src/lib/format.ts" } }] };
+};
+const stalled = await loopMod.runToolLoop({ ctx: makeCtx(), chat: repeat, system: "s", task: "t", maxRounds: 20, maxToolCalls: 20, maxWallClockSec: 30, numCtx: 8192, log: () => {} });
+check("the same call three times is a stall, not an infinite loop", stalled.stop === "stall", stalled.stop);
+
+let rounds = 0;
+const chatty = async () => {
+  rounds++;
+  return { content: "", toolCalls: [{ name: "read_file", arguments: { path: rounds === 1 ? "src/app.ts" : "src/lib/format.ts" } }] };
+};
+const capped = await loopMod.runToolLoop({ ctx: makeCtx(), chat: chatty, system: "s", task: "t", maxRounds: 2, maxToolCalls: 20, maxWallClockSec: 30, numCtx: 8192, log: () => {} });
+check("maxRounds ends the run and says which cap fired", capped.stop === "max-rounds" && capped.rounds === 2, JSON.stringify({ stop: capped.stop, rounds: capped.rounds }));
+
+await fs.rm(agentTmp, { recursive: true, force: true }).catch(() => {});
+await fs.rm(agentOutside, { recursive: true, force: true }).catch(() => {});
+
 await fs.rm(tmp, { recursive: true, force: true }).catch(() => {});
 console.log(failures ? `\nARITHMETIC FAIL: ${failures} check(s)` : "\nARITHMETIC PASS");
 process.exit(failures ? 1 : 0);
