@@ -14,8 +14,20 @@ export function renderReport(r) {
         "",
         r.writes.length ? `Files (${r.writes.length}):` : "Files: none written",
         ...r.writes.map((w) => `  ${w.created ? "new " : "edit"} ${w.rel} (${w.bytes} bytes)`),
+        ...(r.isolation === "worktree"
+            ? [
+                "",
+                `Isolation: worktree${r.worktree ? ` (${r.worktree})` : ""} — your checkout was never written to. The patch is the deliverable.`,
+            ]
+            : []),
         ...(r.patchFile
-            ? ["", `The work is kept as a patch: ${r.patchFile}`, `  read it: git apply --stat ${r.patchFile}   ·   apply it: git apply ${r.patchFile}`]
+            ? [
+                "",
+                r.isolation === "worktree"
+                    ? `The change is in this patch: ${r.patchFile}`
+                    : `The work is kept as a patch: ${r.patchFile}`,
+                `  read it: git apply --stat ${r.patchFile}   ·   apply it: git apply ${r.patchFile}`,
+            ]
             : []),
         "",
         "Gate:",

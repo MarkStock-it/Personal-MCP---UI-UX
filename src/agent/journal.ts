@@ -54,8 +54,13 @@ export interface RevertReport {
 
 const sha256 = (buf: Buffer): string => crypto.createHash("sha256").update(buf).digest("hex");
 
-export async function createJournal(root: string, runId: string, capBytes = 20 * 1024 * 1024): Promise<RunnerJournal> {
-  const dir = path.join(root, ".design-mcp", "agent", runId);
+/**
+ * `root` is where the run wrote (the worktree, in worktree isolation) and is what a revert targets. `recordRoot`
+ * is where the record lives — always the owner's real checkout, so a worktree run leaves its report, journal and
+ * patch somewhere the owner will actually look, not inside a directory that gets removed.
+ */
+export async function createJournal(root: string, runId: string, capBytes = 20 * 1024 * 1024, recordRoot = root): Promise<RunnerJournal> {
+  const dir = path.join(recordRoot, ".design-mcp", "agent", runId);
   await fs.mkdir(path.join(dir, "pre-images"), { recursive: true });
   const journal: RunnerJournal = {
     dir,

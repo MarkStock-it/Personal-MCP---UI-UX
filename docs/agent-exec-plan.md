@@ -1,15 +1,16 @@
 # Phase 9 — `agent_run`: an opt-in model with hands
 
-**Status:** **built** (M0–M4 and M6). `src/agent/` exists, `agent_run` is the 38th tool, and the keyless gate
-is 502 checks: 306 (stdio) + 174 (arithmetic, including the agent's resolver, command policy, revert and a
-scripted loop) + 22 (`smoke/agent-e2e.mjs`: two whole runs against a stub Ollama, one kept and one reverted
-byte-for-byte). It was written against the tree at `97a87ad` and every file reference below was read, not
+**Status:** **built** (M0–M6). `src/agent/` exists, `agent_run` is the 38th tool, and the keyless gate is 511
+checks: 306 (stdio) + 174 (arithmetic, including the agent's resolver, command policy, revert and a scripted
+loop) + 31 (`smoke/agent-e2e.mjs`: three whole runs against a stub Ollama — one kept, one reverted
+byte-for-byte, one kept in worktree isolation whose change never reaches the owner's checkout). It was written against the tree at `97a87ad` and every file reference below was read, not
 remembered.
 
 **Deviations from the plan, all named rather than hidden**
-- **M5 (worktree isolation) is not built.** `agent.isolation: "worktree"` is accepted by the schema and
-  refused at preflight, because silently running in place would make the report claim an isolation it did not
-  have. In-place + the snapshot is what ships.
+- **M5 (worktree isolation) is built differently from the sketch.** Instead of handing back a patch and leaving a
+  worktree behind, the run removes its scratch checkout once the record and the patch are written; `node_modules`
+  is symlinked from the real tree so the project's own tests can run there. It is tidiness, not a sandbox, and
+  the report says so.
 - **The council diff review fails closed.** It needs a host that answers MCP sampling; where it cannot (Freebuff's
   MCP client, Cursor) a run is reverted unless `agent.gates.councilReview: false`, and the report says the diff
   was never read. This is the honest behaviour, not the convenient one.

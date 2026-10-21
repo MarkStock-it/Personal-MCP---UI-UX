@@ -20,7 +20,7 @@ import { startJob } from "../jobs.js";
 import { run as runCmd } from "../util/exec.js";
 import { createJournal, recordEvent } from "./journal.js";
 import { ollamaChat, runToolLoop } from "./loop.js";
-import { gateRun } from "./gate.js";
+import { exportPatch, gateRun } from "./gate.js";
 import { renderReport } from "./report.js";
 import { normalizeRel } from "./sandbox.js";
 const emptyCounters = () => ({
@@ -134,11 +134,6 @@ async function preflight(root, config, writeRoots) {
         if (!n.ok)
             throw new Error(`agent.writeRoots: ${n.reason}`);
     }
-    // Refused rather than silently downgraded: a config value that ends up running in-place anyway would make the
-    // report claim an isolation the run never had.
-    if (cfg.isolation === "worktree") {
-        throw new Error('agent.isolation is set to "worktree", which this build does not implement yet. Set it to "in-place" (the default): the snapshot and the end-of-run gate are what protect the tree, and the run says so in its report.');
-    }
     const h = await health(settingsFor(cfg));
     if (!h.ok) {
         throw new Error(`Ollama is not reachable at ${cfg.host} (${h.detail ?? "no detail"}). Start it with \`ollama serve\` and pull the model (\`ollama pull ${cfg.model}\`).`);
@@ -174,7 +169,28 @@ async function preflight(root, config, writeRoots) {
         throw new Error(lock);
     try {
         const { index } = await getIndex(root, config.codebase);
-        return { runId, index };
+        // Worktree isolation: the run gets its own checkout at HEAD and the owner's tree is never written to. The
+        // patch is the deliverable, and the report says so — "kept" here means kept in the worktree, not applied.
+        let worktree;
+        if (cfg.isolation === "worktree") {
+            const repo = await runCmd("git", ["rev-parse", "--is-inside-work-tree"], root, 15_000, { shell: false });
+            if (repo.code !== 0 || !/true/.test(repo.out)) {
+                throw new Error('agent.isolation is "worktree", which needs a git repository with at least one commit. Use "in-place" for a directory that is not a repo, or commit once first.');
+            }
+            worktree = path.join(root, ".design-mcp", "agent", runId, "tree");
+            const add = await runCmd("git", ["worktree", "add", "--detach", worktree, "HEAD"], root, 120_000, { shell: false });
+            if (add.code !== 0) {
+                throw new Error(`could not create the worktree at ${worktree}: ${add.out.trim().split("\n").slice(-3).join(" ")}`);
+            }
+            // A worktree has no node_modules, so the project's own test command would fail for a reason that has
+            // nothing to do with the change. Symlinked from the real checkout, read-only in practice, and said out
+            // loud in the report.
+            const hasLocal = await fs.stat(path.join(worktree, "node_modules")).then(() => true).catch(() => false);
+            const hasSource = await fs.stat(path.join(root, "node_modules")).then(() => true).catch(() => false);
+            if (!hasLocal && hasSource)
+                await fs.symlink(path.join(root, "node_modules"), path.join(worktree, "node_modules"), "junction").catch(() => { });
+        }
+        return { runId, index, ...(worktree ? { worktree } : {}) };
     }
     catch (e) {
         await releaseLock(root, runId);
@@ -190,7 +206,8 @@ export async function startAgentRun(root, config, input) {
     const task = input.task.trim();
     if (!task)
         throw new Error("agent_run needs a task: one or two sentences saying what to change or find out");
-    const { runId, index } = await preflight(root, config, cfg.writeRoots);
+    const { runId, index, worktree } = await preflight(root, config, cfg.writeRoots);
+    const runRoot = worktree ?? root;
     const outcomeRef = {};
     const job = startJob("agent", async (log) => {
         const t0 = Date.now();
@@ -205,11 +222,13 @@ export async function startAgentRun(root, config, input) {
         try {
             log(`agent run ${runId}: ${task}`);
             log(`model ${cfg.model} · writeRoots ${cfg.writeRoots.length ? cfg.writeRoots.join(", ") : "(none: read-only)"} · caps ${input.maxRounds ?? cfg.maxRounds} rounds / ${cfg.maxToolCalls} calls / ${cfg.maxWallClockSec}s`);
-            const journal = await createJournal(root, runId);
+            if (worktree)
+                log(`isolation: worktree — the run writes to ${worktree}; your checkout is not touched.`);
+            const journal = await createJournal(runRoot, runId, 20 * 1024 * 1024, root);
             journalDir = journal.dir;
-            await recordEvent(journal, { event: "start", task, model: cfg.model, writeRoots: cfg.writeRoots, dryRun: !!input.dryRun });
+            await recordEvent(journal, { event: "start", task, model: cfg.model, writeRoots: cfg.writeRoots, dryRun: !!input.dryRun, isolation: cfg.isolation, ...(worktree ? { worktree } : {}) });
             const ctx = {
-                sandbox: { root, writeRoots: cfg.writeRoots },
+                sandbox: { root: runRoot, writeRoots: cfg.writeRoots },
                 journal,
                 index,
                 cfg,
@@ -235,8 +254,14 @@ export async function startAgentRun(root, config, input) {
             stop = loop.stop;
             summary = loop.summary;
             log(`  loop ended: ${stop} after ${rounds} round(s), ${toolCalls} tool call(s)`);
-            const gate = await gateRun({ root, index, cfg, local: config.local, journal, writes, task, summary, log });
+            const gate = await gateRun({ root: runRoot, index, cfg, local: config.local, journal, writes, task, summary, log });
             outcomeRef.outcome = gate.outcome;
+            // A worktree run has not touched the owner's tree, so the patch IS the deliverable. On a kept run the
+            // patch is written here; on a refused one the gate already wrote it before restoring the worktree.
+            let patchFile = gate.patchFile;
+            if (worktree && gate.outcome === "kept" && writes.length) {
+                patchFile = await exportPatch({ root: runRoot, index, cfg, local: config.local, journal, writes, task, summary, log });
+            }
             const wallMs = Date.now() - t0;
             const report = renderReport({
                 runId,
@@ -253,11 +278,13 @@ export async function startAgentRun(root, config, input) {
                 toolCalls,
                 wallMs,
                 modelMs,
-                ...(gate.patchFile ? { patchFile: gate.patchFile } : {}),
+                isolation: cfg.isolation,
+                ...(worktree ? { worktree } : {}),
+                ...(patchFile ? { patchFile } : {}),
                 dir: journal.dir,
             });
             await fs.writeFile(path.join(journal.dir, "report.md"), `${report}\n`);
-            await fs.writeFile(path.join(journal.dir, "result.json"), `${JSON.stringify({ runId, task, model: cfg.model, outcome: gate.outcome, stop, checks: gate.checks, writes: writes.map((w) => w.rel), rounds, toolCalls, wallMs, modelMs, summary, patch: gate.patchFile }, null, 2)}\n`);
+            await fs.writeFile(path.join(journal.dir, "result.json"), `${JSON.stringify({ runId, task, model: cfg.model, outcome: gate.outcome, isolation: cfg.isolation, worktree, stop, checks: gate.checks, writes: writes.map((w) => w.rel), rounds, toolCalls, wallMs, modelMs, summary, patch: patchFile }, null, 2)}\n`);
             bumpCounters(root, {
                 runs: 1,
                 kept: gate.outcome === "kept" ? 1 : 0,
@@ -283,6 +310,14 @@ export async function startAgentRun(root, config, input) {
             return [`agent run ${runId} FAILED before the gate.`, message, "", `Record: ${journalDir}`].join("\n");
         }
         finally {
+            // A worktree is a scratch checkout: remove it once the record and the patch are written. A kept worktree
+            // run still hands the patch over, so nothing is lost by removing the directory it was produced in.
+            if (worktree) {
+                const rm = await runCmd("git", ["worktree", "remove", "--force", worktree], root, 60_000, { shell: false });
+                if (rm.code !== 0)
+                    log(`  note: could not remove the worktree at ${worktree}; remove it with \`git worktree remove --force\``);
+                await runCmd("git", ["worktree", "prune"], root, 30_000, { shell: false });
+            }
             await releaseLock(root, runId);
         }
     });
@@ -292,6 +327,12 @@ export async function startAgentRun(root, config, input) {
         `Writes allowed under: ${cfg.writeRoots.length ? cfg.writeRoots.join(", ") : "nothing (read-only)"}`,
         `Caps: ${input.maxRounds ?? cfg.maxRounds} rounds · ${cfg.maxToolCalls} tool calls · ${cfg.maxWallClockSec}s.`,
         "It reads, searches, writes and runs commands itself, then the gate re-checks the edits, reviews the diff and runs the project's tests. Whatever fails is reverted and kept as proposed.patch.",
+        ...(worktree
+            ? [
+                `Isolation: worktree — it works in its own checkout at ${worktree}, so your tree is not written to.`,
+                `A passing run hands you a patch: ${path.join(root, ".design-mcp", "agent", runId, "proposed.patch")}`,
+            ]
+            : []),
         `Follow it with design_status (job ${job.id}). Record: .design-mcp/agent/${runId}/`,
     ].join("\n");
     return { job, text };

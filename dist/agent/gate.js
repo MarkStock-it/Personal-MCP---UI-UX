@@ -138,6 +138,10 @@ export function changeSize(before, after) {
             changed++;
     return changed;
 }
+/** The patch for a run whose work never landed in the owner's tree (worktree isolation). */
+export async function exportPatch(input) {
+    return capturePatch(input);
+}
 export async function gateRun(input) {
     const checks = [];
     const failures = [];

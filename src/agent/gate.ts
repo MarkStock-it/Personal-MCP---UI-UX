@@ -158,6 +158,11 @@ export function changeSize(before: string | null, after: string): number {
   return changed;
 }
 
+/** The patch for a run whose work never landed in the owner's tree (worktree isolation). */
+export async function exportPatch(input: GateInput): Promise<string | undefined> {
+  return capturePatch(input);
+}
+
 export async function gateRun(input: GateInput): Promise<GateOutcome> {
   const checks: string[] = [];
   const failures: string[] = [];

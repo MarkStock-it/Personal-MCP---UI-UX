@@ -204,6 +204,56 @@ try {
   const countersAfterRevert = await call("agent_run");
   check("the counters now say 2 runs: 1 kept, 1 reverted", /2 run\(s\) — 1 kept, 1 reverted/.test(countersAfterRevert.text), countersAfterRevert.text.slice(0, 400));
 
+  // Run 3: worktree isolation. The run gets its own checkout, so a passing change must NOT touch the owner's
+  // tree and must arrive as a patch instead.
+  const cfgPath = path.join(tmp, "design-mcp.config.json");
+  const cfgJson = JSON.parse(await fs.readFile(cfgPath, "utf8"));
+  cfgJson.agent.isolation = "worktree";
+  await fs.writeFile(cfgPath, JSON.stringify(cfgJson, null, 2));
+  // The config is tracked in the fixture, and requireClean is on: commit the change, or the third run refuses
+  // for the same good reason the first one would have.
+  await git(["add", "-A"]);
+  const cfgCommit = await git(["commit", "-q", "-m", "switch the fixture to worktree isolation"]);
+  check("the fixture commits the isolation change before the third run", cfgCommit.ok, cfgCommit.out);
+
+  const beforeThird = await fs.readFile(path.join(tmp, "src", "math.js"), "utf8");
+  replies.push(
+    { content: "", tool_calls: [{ function: { name: "read_file", arguments: { path: "src/math.js" } } }] },
+    {
+      content: "",
+      tool_calls: [
+        {
+          function: {
+            name: "edit",
+            arguments: {
+              path: "src/math.js",
+              anchor: "export const doubled = (n) => add(n, n);",
+              replacement: "export const doubled = (n) => add(n, n);\nexport const tripled = (n) => add(n, add(n, n));",
+            },
+          },
+        },
+      ],
+    },
+    { content: "", tool_calls: [{ function: { name: "finish", arguments: { summary: "added tripled() in a worktree" } } }] }
+  );
+  const started3 = await call("agent_run", { task: "add a tripled() helper to src/math.js" });
+  check("a worktree run says so before it starts", /Isolation: worktree/.test(started3.text), started3.text.slice(0, 400));
+  const jobId3 = started3.text.match(/job ([a-z0-9-]+)\)/)?.[1] ?? "";
+  const done3 = await poll(jobId3);
+  check("the worktree run passes the gate", /KEPT/.test(done3.text), done3.text.slice(0, 600));
+  check("...and the report says the checkout was never written to", /Isolation: worktree/.test(done3.text) && /never written to/.test(done3.text), done3.text.slice(0, 800));
+  const ownerFile = await fs.readFile(path.join(tmp, "src", "math.js"), "utf8");
+  check("the owner's tree is byte-identical after a kept worktree run", ownerFile === beforeThird, ownerFile.slice(0, 160));
+  const thirdDirs = (await fs.readdir(path.join(tmp, ".design-mcp", "agent"))).filter((d) => d.startsWith("a-")).sort();
+  const thirdDir = thirdDirs.at(-1) ?? "missing";
+  const thirdResult = JSON.parse(await fs.readFile(path.join(tmp, ".design-mcp", "agent", thirdDir, "result.json"), "utf8").catch(() => "{}"));
+  check("the run records worktree isolation and a patch", thirdResult.isolation === "worktree" && !!thirdResult.patch, JSON.stringify(thirdResult).slice(0, 200));
+  const thirdPatch = thirdResult.patch ? await fs.readFile(thirdResult.patch, "utf8").catch(() => "") : "";
+  check("the patch carries the change the owner never received", /tripled/.test(thirdPatch), thirdPatch.slice(0, 200));
+  check("the scratch worktree is removed after the record is written", (await fs.stat(path.join(tmp, ".design-mcp", "agent", thirdDir, "tree")).catch(() => null)) === null);
+  const countersAfterWorktree = await call("agent_run");
+  check("the counters now say 3 runs: 2 kept, 1 reverted", /3 run\(s\) — 2 kept, 1 reverted/.test(countersAfterWorktree.text), countersAfterWorktree.text.slice(0, 400));
+
   check("the requests really went to /api/chat with tools", requests.length >= 4 && Array.isArray(requests[0].tools) && requests[0].tools.length === 10, JSON.stringify(requests[0]?.tools?.length));
   check("...and no request used the generate endpoint", requests.every((r) => r.model === "stub-coder:latest"));
 } finally {

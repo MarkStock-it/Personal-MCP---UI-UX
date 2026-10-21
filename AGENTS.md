@@ -8,7 +8,7 @@ Node >= 20, TypeScript, ESM. `dist/` is committed because the host runs `dist/in
 ```bash
 npm install
 npm run build          # tsc -> dist/
-npm test               # 502-check keyless gate: smoke/smoke.mjs (306, stdio suite) + smoke/arithmetic.mjs (174, the built modules driven directly) + smoke/agent-e2e.mjs (22, two whole agent runs against a stub Ollama); no API keys needed
+npm test               # 511-check keyless gate: smoke/smoke.mjs (306, stdio suite) + smoke/arithmetic.mjs (174, the built modules driven directly) + smoke/agent-e2e.mjs (31, three whole agent runs against a stub Ollama); no API keys needed
 DESIGN_MCP_PROJECT_DIR=<dir> node smoke/call.mjs <tool> '[json]'   # call one tool
 npm run inspect        # MCP inspector
 npx tsx tools/lab/run.ts   # the memory experiment; see tools/lab/README.md (not a gate)
@@ -38,11 +38,12 @@ ambiguous, not found, out of range, missing, refused, unindexed, and the import-
 and every grade rule (a clean run is `STRONG`; one unapplicable edit, one wrong citation, one thin quote, one
 silent unit, no closing pass or one sentence of that paragraph that still contradicts the record are each
 enough to stop it, and a step that was re-placed by the edit repair pass or a sentence the conclusion pass
-rewrote to stand on the record stops counting). `smoke/agent-e2e.mjs` (22 checks) starts two whole agent runs
-through the real MCP surface against a stub Ollama server: one that passes the gate and is kept, and one whose
-write breaks the fixture's own test and is reverted byte-for-byte with its work kept as `proposed.patch` — the
-executor is only allowed to exist if its own gate is asserted, not described. It must all pass — 502/502
-(306 + 174 + 22) — before any change is called done.
+rewrote to stand on the record stops counting). `smoke/agent-e2e.mjs` (31 checks) starts three whole agent runs
+through the real MCP surface against a stub Ollama server: one that passes the gate and is kept, one whose
+write breaks the fixture's own test and is reverted byte-for-byte with its work kept as `proposed.patch`, and
+one in `worktree` isolation whose kept change never reaches the owner's checkout and arrives as a patch — the
+executor is only allowed to exist if its own gate is asserted, not described. It must all pass — 511/511
+(306 + 174 + 31) — before any change is called done.
 
 ## Map
 - `src/index.ts` — the MCP surface: 38 tools — 15 generating/testing, 6 playbook, 10 codebase/collective
@@ -312,12 +313,15 @@ This is the contract, and it is what the code does — with the two gaps named a
 - **Never:** a delete tool, commits, pushes, installs, network, sub-agents, or any path by which a skill, a
   memory entry or a mission reaches it. The fifteen invariants and their stub-Ollama tests in the plan are
   the acceptance criteria; a milestone that cannot assert its own is not done.
-- **Two gaps, stated rather than hidden.** `agent.isolation: "worktree"` is accepted by the schema and
-  **refused at preflight** — this build only runs in place, and a silent downgrade would make the report claim
-  an isolation the run never had. And the council diff review needs a host that answers MCP sampling: where it
-  cannot, the run fails closed (nothing kept) unless the owner sets `agent.gates.councilReview: false`, and
-  the report says which of those happened. A diff kept with the review off was never independently read — the
-  report must keep saying so.
+- **Isolation is a directory, not a sandbox.** `agent.isolation: "worktree"` gives the run its own detached
+  checkout under `.design-mcp/agent/<id>/tree` (with `node_modules` symlinked from the real tree so the project's
+  tests can run), so a passing change never touches the owner's checkout and arrives only as
+  `proposed.patch`. The scratch checkout is removed after the record is written. `in-place` remains the default,
+  because a worktree is tidiness and the snapshot plus the gate are what actually protect the tree.
+- **One gap, stated rather than hidden.** The council diff review needs a host that answers MCP sampling:
+  where it cannot, the run fails closed (nothing kept) unless the owner sets `agent.gates.councilReview: false`,
+  and the report says which of those happened. A diff kept with the review off was never independently read —
+  the report must keep saying so.
 
 ## Round two, and what the copies remember
 - Round two (`collective.peerRound`, one extra model call per unit) exchanges **verified findings only** —

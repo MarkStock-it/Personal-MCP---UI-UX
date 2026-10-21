@@ -482,9 +482,10 @@ than doing it myself" has a number under it.
   it, and it is the only command runner this server will ever have.
 - **Two limits worth knowing before you turn it on.** The council diff review runs on your host's model, so a
   host that cannot answer MCP sampling (Freebuff's MCP client, Cursor) makes a run fail closed unless you set
-  `agent.gates.councilReview: false` — and then nothing read the diff, which the report keeps saying.
-  `agent.isolation: "worktree"` is accepted by the schema but refused at start: this build runs in place only,
-  and the snapshot plus the gate are what protect your tree.
+  `agent.gates.councilReview: false` — and then nothing read the diff, which the report keeps saying. And
+  `agent.isolation: "worktree"` is tidiness, not a sandbox: the run gets its own checkout so your tree is never
+  written to, and a passing change reaches you only as a patch. `in-place` (the default) relies on the snapshot,
+  which is what actually makes a bad change reversible.
 - **What it can do, in its own vocabulary:** `read_file`, `list_files`, `search`, `who_refs`, `read_context`,
   `write_file`, `edit`, `run`, `run_audit`, `finish`. No delete, no commit, no install, no network, no
   sub-agents. `agent_run` with no task shows the mode, the model, the write roots and the lifetime counters.
